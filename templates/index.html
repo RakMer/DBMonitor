@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="tr" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="60">
+    <title>DB Monitor – Health Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --color-healthy: #198754;
+            --color-warning: #ffc107;
+            --color-critical: #dc3545;
+        }
+        body {
+            background-color: #0f1117;
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        }
+        .score-ring {
+            width: 180px;
+            height: 180px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3.2rem;
+            font-weight: 700;
+            color: #fff;
+            margin: 0 auto;
+            position: relative;
+            box-shadow: 0 0 40px rgba(0,0,0,0.3);
+        }
+        .score-ring::after {
+            content: '';
+            position: absolute;
+            inset: 6px;
+            border-radius: 50%;
+            background: #1a1d27;
+        }
+        .score-ring span {
+            position: relative;
+            z-index: 2;
+        }
+        .ring-healthy  { background: conic-gradient(var(--color-healthy) 0%, #1a1d27 0%); border: 4px solid var(--color-healthy); }
+        .ring-warning  { background: conic-gradient(var(--color-warning) 0%, #1a1d27 0%); border: 4px solid var(--color-warning); }
+        .ring-critical { background: conic-gradient(var(--color-critical) 0%, #1a1d27 0%); border: 4px solid var(--color-critical); }
+
+        .card-glass {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 16px;
+            backdrop-filter: blur(12px);
+        }
+        .status-badge-healthy  { background-color: var(--color-healthy); }
+        .status-badge-warning  { background-color: var(--color-warning); color: #000; }
+        .status-badge-critical { background-color: var(--color-critical); }
+
+        .table-dark-custom {
+            --bs-table-bg: transparent;
+            --bs-table-border-color: rgba(255,255,255,0.06);
+        }
+        .table-dark-custom th {
+            font-weight: 600;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #8b8fa3;
+        }
+        .chart-container {
+            position: relative;
+            height: 300px;
+        }
+        .penalty-item {
+            border-left: 3px solid var(--color-critical);
+            padding: 8px 14px;
+            margin-bottom: 6px;
+            background: rgba(220, 53, 69, 0.08);
+            border-radius: 0 8px 8px 0;
+            font-size: 0.9rem;
+        }
+        .brand-bar {
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+        .fade-in { animation: fadeIn 0.6s ease-in-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+
+<!-- NAVBAR -->
+<nav class="navbar brand-bar px-4 py-3">
+    <div class="container-fluid">
+        <span class="navbar-brand mb-0 h5 text-white">
+            <i class="bi bi-database-check me-2"></i>DB Monitor
+        </span>
+        <span class="text-secondary small">
+            <i class="bi bi-arrow-repeat me-1"></i>Otomatik yenileme: 60s
+        </span>
+    </div>
+</nav>
+
+<div class="container-fluid px-4 py-4 fade-in">
+
+    {% if latest %}
+    {% set score = latest.score %}
+    {% if score >= 80 %}
+        {% set level = 'healthy' %}
+        {% set level_text = 'Sağlıklı' %}
+        {% set level_icon = 'bi-check-circle-fill' %}
+    {% elif score >= 50 %}
+        {% set level = 'warning' %}
+        {% set level_text = 'Uyarı' %}
+        {% set level_icon = 'bi-exclamation-triangle-fill' %}
+    {% else %}
+        {% set level = 'critical' %}
+        {% set level_text = 'Kritik' %}
+        {% set level_icon = 'bi-x-octagon-fill' %}
+    {% endif %}
+
+    <!-- ROW 1: Skor + Durum + Alarmlar -->
+    <div class="row g-4 mb-4">
+
+        <!-- SKOR KARTI -->
+        <div class="col-lg-4 col-md-6">
+            <div class="card card-glass h-100 p-4 text-center">
+                <h6 class="text-secondary text-uppercase mb-3">
+                    <i class="bi bi-heart-pulse me-1"></i>Sağlık Skoru
+                </h6>
+                <div class="score-ring ring-{{ level }}">
+                    <span>{{ score }}</span>
+                </div>
+                <div class="mt-3">
+                    <span class="badge status-badge-{{ level }} px-3 py-2 fs-6">
+                        <i class="bi {{ level_icon }} me-1"></i>{{ level_text }}
+                    </span>
+                </div>
+                <p class="text-secondary small mt-3 mb-0">
+                    <i class="bi bi-clock me-1"></i>{{ latest.check_date }}
+                </p>
+            </div>
+        </div>
+
+        <!-- DURUM ÖZETİ -->
+        <div class="col-lg-4 col-md-6">
+            <div class="card card-glass h-100 p-4">
+                <h6 class="text-secondary text-uppercase mb-3">
+                    <i class="bi bi-info-circle me-1"></i>Durum Özeti
+                </h6>
+                <ul class="list-unstyled mb-0">
+                    <li class="d-flex justify-content-between align-items-center py-2 border-bottom border-secondary border-opacity-25">
+                        <span class="text-light"><i class="bi bi-hash me-2"></i>Kontrol ID</span>
+                        <span class="badge bg-secondary">#{{ latest.id }}</span>
+                    </li>
+                    <li class="d-flex justify-content-between align-items-center py-2 border-bottom border-secondary border-opacity-25">
+                        <span class="text-light"><i class="bi bi-speedometer2 me-2"></i>Puan</span>
+                        <span class="fw-bold" style="color: var(--color-{{ level }});">{{ score }} / 100</span>
+                    </li>
+                    <li class="d-flex justify-content-between align-items-center py-2 border-bottom border-secondary border-opacity-25">
+                        <span class="text-light"><i class="bi bi-exclamation-diamond me-2"></i>Aktif Alarm</span>
+                        <span class="badge {% if penalties %}bg-danger{% else %}bg-success{% endif %}">{{ penalties | length }}</span>
+                    </li>
+                    <li class="d-flex justify-content-between align-items-center py-2">
+                        <span class="text-light"><i class="bi bi-bar-chart-line me-2"></i>Toplam Kayıt</span>
+                        <span class="badge bg-secondary">{{ history | length }}</span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- AKTİF ALARMLAR -->
+        <div class="col-lg-4 col-md-12">
+            <div class="card card-glass h-100 p-4">
+                <h6 class="text-secondary text-uppercase mb-3">
+                    <i class="bi bi-bell me-1"></i>Aktif Alarmlar
+                </h6>
+                {% if penalties %}
+                <div class="overflow-auto" style="max-height: 260px;">
+                    {% for p in penalties %}
+                    <div class="penalty-item">
+                        <i class="bi bi-exclamation-circle text-danger me-2"></i>
+                        <span class="text-light">{{ p }}</span>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="alert alert-success d-flex align-items-center mb-0" role="alert" style="background: rgba(25,135,84,0.12); border-color: rgba(25,135,84,0.3);">
+                    <i class="bi bi-shield-check fs-4 me-3 text-success"></i>
+                    <div>
+                        <strong>Tüm Sistemler Normal</strong><br>
+                        <small class="text-success-emphasis">Sistemde risk bulunmuyor.</small>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- ROW 2: TREND GRAFİĞİ -->
+    <div class="row g-4 mb-4">
+        <div class="col-12">
+            <div class="card card-glass p-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h6 class="text-secondary text-uppercase mb-0">
+                        <i class="bi bi-graph-up me-1"></i>Skor Trendi (Son 20 Kontrol)
+                    </h6>
+                    <span class="text-secondary small">
+                        <span class="badge bg-success me-1">&nbsp;</span>80-100
+                        <span class="badge bg-warning text-dark ms-2 me-1">&nbsp;</span>50-79
+                        <span class="badge bg-danger ms-2 me-1">&nbsp;</span>0-49
+                    </span>
+                </div>
+                <div class="chart-container">
+                    <canvas id="trendChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ROW 3: GEÇMİŞ TABLOSU -->
+    <div class="row g-4 mb-4">
+        <div class="col-12">
+            <div class="card card-glass p-4">
+                <h6 class="text-secondary text-uppercase mb-3">
+                    <i class="bi bi-clock-history me-1"></i>Kontrol Geçmişi
+                </h6>
+                <div class="table-responsive">
+                    <table class="table table-dark-custom table-hover align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>Tarih / Saat</th>
+                                <th>Skor</th>
+                                <th>Durum</th>
+                                <th>Cezalar</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for h in history %}
+                            {% if h.score >= 80 %}
+                                {% set row_level = 'healthy' %}
+                                {% set row_text = 'Sağlıklı' %}
+                            {% elif h.score >= 50 %}
+                                {% set row_level = 'warning' %}
+                                {% set row_text = 'Uyarı' %}
+                            {% else %}
+                                {% set row_level = 'critical' %}
+                                {% set row_text = 'Kritik' %}
+                            {% endif %}
+                            <tr>
+                                <td class="text-secondary">{{ h.id }}</td>
+                                <td class="text-light">{{ h.check_date }}</td>
+                                <td>
+                                    <span class="fw-bold" style="color: var(--color-{{ row_level }});">{{ h.score }}</span>
+                                </td>
+                                <td>
+                                    <span class="badge status-badge-{{ row_level }}">{{ row_text }}</span>
+                                </td>
+                                <td>
+                                    {% if h.penalties %}
+                                        {% for p in h.penalties %}
+                                        <span class="badge bg-danger bg-opacity-25 text-danger me-1 mb-1">{{ p }}</span>
+                                        {% endfor %}
+                                    {% else %}
+                                        <span class="text-success small"><i class="bi bi-check-lg"></i> Temiz</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    {% else %}
+    <!-- VERİ YOK DURUMU -->
+    <div class="row justify-content-center mt-5">
+        <div class="col-md-6 text-center">
+            <div class="card card-glass p-5">
+                <i class="bi bi-database-slash display-1 text-secondary mb-3"></i>
+                <h4 class="text-light">Henüz Veri Yok</h4>
+                <p class="text-secondary">Veritabanında kontrol kaydı bulunamadı. İzleme motoru çalıştıktan sonra veriler burada görünecektir.</p>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+</div>
+
+<!-- FOOTER -->
+<footer class="text-center text-secondary small py-3 border-top border-secondary border-opacity-10">
+    DB Monitor Dashboard &copy; 2026 &mdash; Veriler her 5 dakikada güncellenir
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+
+{% if latest %}
+<script>
+    const labels = {{ chart_labels | tojson }};
+    const scores = {{ chart_scores | tojson }};
+
+    // Noktaların rengini skora göre belirle
+    const pointColors = scores.map(s => {
+        if (s >= 80) return '#198754';
+        if (s >= 50) return '#ffc107';
+        return '#dc3545';
+    });
+
+    // Çizginin altını gradyan doldur
+    const ctx = document.getElementById('trendChart').getContext('2d');
+    const gradient = ctx.createLinearGradient(0, 0, 0, 300);
+    gradient.addColorStop(0, 'rgba(25, 135, 84, 0.25)');
+    gradient.addColorStop(0.5, 'rgba(255, 193, 7, 0.08)');
+    gradient.addColorStop(1, 'rgba(220, 53, 69, 0.05)');
+
+    new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Sağlık Skoru',
+                data: scores,
+                borderColor: pointColors,
+                backgroundColor: gradient,
+                pointBackgroundColor: pointColors,
+                pointBorderColor: pointColors,
+                pointRadius: 5,
+                pointHoverRadius: 8,
+                borderWidth: 2.5,
+                fill: true,
+                tension: 0.35,
+                segment: {
+                    borderColor: (ctx) => {
+                        const val = ctx.p1.parsed.y;
+                        if (val >= 80) return '#198754';
+                        if (val >= 50) return '#ffc107';
+                        return '#dc3545';
+                    }
+                }
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+                intersect: false,
+                mode: 'index'
+            },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: 'rgba(15, 17, 23, 0.95)',
+                    titleColor: '#fff',
+                    bodyColor: '#ccc',
+                    borderColor: 'rgba(255,255,255,0.1)',
+                    borderWidth: 1,
+                    cornerRadius: 8,
+                    padding: 12,
+                    callbacks: {
+                        label: (context) => {
+                            const val = context.parsed.y;
+                            let status = 'Kritik';
+                            if (val >= 80) status = 'Sağlıklı';
+                            else if (val >= 50) status = 'Uyarı';
+                            return `Skor: ${val} (${status})`;
+                        }
+                    }
+                },
+                // Arka plan bölgeleri çizimi
+                annotation: undefined
+            },
+            scales: {
+                x: {
+                    ticks: {
+                        color: '#8b8fa3',
+                        maxRotation: 45,
+                        font: { size: 10 }
+                    },
+                    grid: { color: 'rgba(255,255,255,0.04)' }
+                },
+                y: {
+                    min: 0,
+                    max: 100,
+                    ticks: {
+                        color: '#8b8fa3',
+                        stepSize: 10,
+                        callback: (val) => val
+                    },
+                    grid: { color: 'rgba(255,255,255,0.04)' }
+                }
+            }
+        },
+        plugins: [{
+            id: 'bgZones',
+            beforeDraw(chart) {
+                const { ctx, chartArea: { left, right, top, bottom }, scales: { y } } = chart;
+
+                // Yeşil bölge (80-100)
+                const y80 = y.getPixelForValue(80);
+                const y100 = y.getPixelForValue(100);
+                ctx.fillStyle = 'rgba(25, 135, 84, 0.06)';
+                ctx.fillRect(left, y100, right - left, y80 - y100);
+
+                // Sarı bölge (50-79)
+                const y50 = y.getPixelForValue(50);
+                ctx.fillStyle = 'rgba(255, 193, 7, 0.04)';
+                ctx.fillRect(left, y80, right - left, y50 - y80);
+
+                // Kırmızı bölge (0-49)
+                const y0 = y.getPixelForValue(0);
+                ctx.fillStyle = 'rgba(220, 53, 69, 0.04)';
+                ctx.fillRect(left, y50, right - left, y0 - y50);
+
+                // Ayırıcı çizgiler
+                ctx.setLineDash([6, 4]);
+                ctx.lineWidth = 1;
+
+                ctx.strokeStyle = 'rgba(25, 135, 84, 0.3)';
+                ctx.beginPath();
+                ctx.moveTo(left, y80);
+                ctx.lineTo(right, y80);
+                ctx.stroke();
+
+                ctx.strokeStyle = 'rgba(220, 53, 69, 0.3)';
+                ctx.beginPath();
+                ctx.moveTo(left, y50);
+                ctx.lineTo(right, y50);
+                ctx.stroke();
+
+                ctx.setLineDash([]);
+            }
+        }]
+    });
+</script>
+{% endif %}
+
+</body>
+</html>
