@@ -37,6 +37,7 @@ DB Monitor, hedef MSSQL sunucusuna bağlanarak 10 farklı kritik metriği analiz
 | 6 | Blocking sorgular | -10 puan / blok |
 | 7 | Sysadmin hesap sayısı ve brute-force tespiti | -10 / -15 puan |
 | 8 | Başarısız SQL Agent Job'ları | -15 puan / job |
+| 9 | Yanlış Auto Growth ayarları | -10 puan / dosya |
 | 10 | Log dosyası doluluk oranı (≥%90) | -30 puan |
 
 ### 📊 Web Dashboard (`app.py` + `templates/index.html`)
