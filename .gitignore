@@ -1,0 +1,20 @@
+# Sanal ortam
+DBvenv/
+
+# Hassas bilgiler
+.env
+
+# SQLite veritabanı
+dbmonitor.sqlite3
+
+# Python önbelleği
+__pycache__/
+*.py[cod]
+*.pyo
+
+# macOS sistem dosyaları
+.DS_Store
+
+# IDE dosyaları
+.vscode/
+.idea/

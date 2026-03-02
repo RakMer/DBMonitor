@@ -1,14 +1,23 @@
 import pyodbc
 import sqlite3
+import os
 from datetime import datetime
+from dotenv import load_dotenv
+
+# .env dosyasından bağlantı bilgilerini yükle
+load_dotenv()
 
 # MSSQL Bağlantı Bilgileri
-server = '10.20.2.23' 
-database = 'master' 
-username = 'sa' 
-password = 'Baran1q2w3e!' 
+server   = os.getenv('DB_SERVER')
+database = os.getenv('DB_NAME')
+username = os.getenv('DB_USER')
+password = os.getenv('DB_PASSWORD')
+driver   = os.getenv('DB_DRIVER', 'ODBC Driver 18 for SQL Server')
 
-conn_str = f'DRIVER={{ODBC Driver 18 for SQL Server}};SERVER={server};DATABASE={database};UID={username};PWD={password};TrustServerCertificate=yes;'
+if not all([server, database, username, password]):
+    raise ValueError("❌ .env dosyasında eksik bağlantı bilgisi var! DB_SERVER, DB_NAME, DB_USER, DB_PASSWORD kontrol edin.")
+
+conn_str = f'DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};PWD={password};TrustServerCertificate=yes;'
 
 # --- SQLITE VERİTABANI KURULUMU ---
 def init_sqlite_db():
