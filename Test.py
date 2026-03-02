@@ -1,6 +1,7 @@
 import pyodbc
 import sqlite3
 import os
+import requests
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -18,6 +19,47 @@ if not all([server, database, username, password]):
     raise ValueError("❌ .env dosyasında eksik bağlantı bilgisi var! DB_SERVER, DB_NAME, DB_USER, DB_PASSWORD kontrol edin.")
 
 conn_str = f'DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};PWD={password};TrustServerCertificate=yes;'
+
+TELEGRAM_THRESHOLD = int(os.getenv('TELEGRAM_ALERT_THRESHOLD', 70))
+
+# --- TELEGRAM BİLDİRİM FONKSİYONU ---
+def send_telegram_alert(score, penalties):
+    token   = os.getenv('TELEGRAM_TOKEN')
+    chat_id = os.getenv('TELEGRAM_CHAT_ID')
+    if not token or not chat_id:
+        print("⚠️  Telegram bilgileri .env dosyasında eksik, bildirim atlandı.")
+        return
+
+    penalty_lines = "\n".join(f"• {p}" for p in penalties) if penalties else "• Belirtilen ceza yok."
+    
+    if score >= 80:
+        status_emoji = "✅"
+        status_text  = "Sağlıklı"
+    elif score >= 50:
+        status_emoji = "⚠️"
+        status_text  = "Uyarı"
+    else:
+        status_emoji = "🚨"
+        status_text  = "KRİTİK"
+
+    message = (
+        f"{status_emoji} <b>DB Monitor Alarmı</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🖥️  <b>Sunucu:</b> {server}\n"
+        f"📊 <b>Sağlık Skoru:</b> <b>{score}/100</b> — {status_text}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Aktif Alarmlar:</b>\n{penalty_lines}"
+    )
+
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        resp = requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
+        if resp.ok:
+            print(f"📨 Telegram bildirimi gönderildi! (Skor: {score})")
+        else:
+            print(f"⚠️  Telegram gönderimi başarısız: {resp.text}")
+    except Exception as e:
+        print(f"⚠️  Telegram hatası: {e}")
 
 # --- SQLITE VERİTABANI KURULUMU ---
 def init_sqlite_db():
@@ -167,8 +209,8 @@ def run_health_check_with_score():
         SELECT name 
         FROM sys.server_principals 
         WHERE IS_SRVROLEMEMBER('sysadmin', name) = 1 
-        AND name NOT LIKE 'NT SERVICE\%' 
-        AND name NOT LIKE 'NT AUTHORITY\%' 
+        AND name NOT LIKE 'NT SERVICE\\%' 
+        AND name NOT LIKE 'NT AUTHORITY\\%' 
         AND name != 'sa'
         """
         cursor.execute(sysadmin_query)
@@ -270,6 +312,9 @@ def run_health_check_with_score():
         print(f"🏆 GÜNCEL SUNUCU SAĞLIK SKORU: {health_score} / 100")
         
         save_to_sqlite(health_score, penalties)
+
+        if health_score < TELEGRAM_THRESHOLD:
+            send_telegram_alert(health_score, penalties)
                 
         conn.close()
         
