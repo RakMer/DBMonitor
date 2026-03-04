@@ -13,7 +13,7 @@ server   = os.getenv('DB_SERVER')
 database = os.getenv('DB_NAME')
 username = os.getenv('DB_USER')
 password = os.getenv('DB_PASSWORD')
-driver   = os.getenv('DB_DRIVER', 'ODBC Driver 18 for SQL Server')
+driver   = os.getenv('DB_DRIVER', 'SQL Server')
 
 if not all([server, database, username, password]):
     raise ValueError("❌ .env dosyasında eksik bağlantı bilgisi var! DB_SERVER, DB_NAME, DB_USER, DB_PASSWORD kontrol edin.")
