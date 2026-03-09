@@ -5,12 +5,14 @@ Bu betik 7/24 arka planda çalışır ve Telegram üzerinden gelen komutlarla
 MSSQL veritabanlarını yönetir (Online/Offline/Restart/Status).
 
 Komutlar:
-    /stopdb    [db_adı]  → Veritabanını OFFLINE yapar
-    /startdb   [db_adı]  → Veritabanını ONLINE yapar
-    /restartdb [db_adı]  → OFFLINE → bekleme → ONLINE (Restart)
-    /statusdb  [db_adı]  → Veritabanının mevcut durumunu gösterir
-    /listdb              → Tüm veritabanlarını ve durumlarını listeler
-    /help                → Kullanılabilir komutları gösterir
+    /stopdb      [db_adı]  → Veritabanını OFFLINE yapar
+    /startdb     [db_adı]  → Veritabanını ONLINE yapar
+    /restartdb   [db_adı]  → OFFLINE → bekleme → ONLINE (Restart)
+    /statusdb    [db_adı]  → Veritabanının mevcut durumunu gösterir
+    /listdb                → Tüm veritabanlarını ve durumlarını listeler
+    /takebackup  [db_adı]  → Veritabanının yedeğini alır
+    /check                 → Anlık sağlık kontrolü tetikler ve skoru gönderir
+    /help                  → Kullanılabilir komutları gösterir
 
 Güvenlik:
     Sadece .env dosyasındaki TELEGRAM_CHAT_IDS listesindeki kullanıcılar
@@ -25,6 +27,7 @@ import time
 import logging
 import pyodbc
 import telebot
+import Test
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -173,20 +176,26 @@ def cmd_help(message):
     help_text = (
         "🤖 <b>DB Monitor Bot — Komut Listesi</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>🗄️ Veritabanı Yönetimi</b>\n"
         "🔴 <code>/stopdb [db_adı]</code>\n"
         "    → Veritabanını OFFLINE yapar\n\n"
         "🟢 <code>/startdb [db_adı]</code>\n"
         "    → Veritabanını ONLINE yapar\n\n"
         "🔄 <code>/restartdb [db_adı]</code>\n"
         "    → Veritabanını yeniden başlatır\n\n"
+        "<b>📊 İzleme &amp; Sorgulama</b>\n"
         "📊 <code>/statusdb [db_adı]</code>\n"
-        "    → Veritabanının durumunu sorgular\n\n"
+        "    → Veritabanının detaylı durumunu gösterir\n\n"
         "📋 <code>/listdb</code>\n"
-        "    → Tüm veritabanlarını listeler\n\n"
+        "    → Tüm veritabanlarını ve durumlarını listeler\n\n"
+        "🏥 <code>/check</code>\n"
+        "    → Anlık sağlık kontrolü çalıştırır ve skoru gönderir\n\n"
+        "<b>💾 Yedekleme</b>\n"
+        "💾 <code>/takebackup [db_adı]</code>\n"
+        "    → Veritabanının yedeğini alır (C:\\Backups\\)\n\n"
+        "<b>ℹ️ Genel</b>\n"
         "❓ <code>/help</code>\n"
         "    → Bu yardım mesajını gösterir\n\n"
-        "🔄 <code>/take_backup [db_adı]</code>\n"
-        "    → Veritabanının yedeğini alır\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🖥️ Bağlı Sunucu: <code>{DB_SERVER}</code>\n"
         f"👤 Yetkili Kullanıcı Sayısı: {len(ALLOWED_CHAT_IDS)}"
@@ -631,6 +640,11 @@ def cmd_restartdb(message):
                 logger.info(f"⚠️ Hata sonrası {db_name} ONLINE'a geri alındı")
         except Exception:
             logger.error(f"❌ {db_name} ONLINE'a geri alınamadı!")
+
+@bot.message_handler(commands=["check"])
+def check(message):
+    Test.run_health_check_with_score()
+    
 
 
 # ============================================================
