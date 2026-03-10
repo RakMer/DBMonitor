@@ -2,6 +2,11 @@ import sqlite3
 import os
 from flask import Flask, render_template
 
+current_message_statu = 0
+alert_sent_time = None      # Mesajın atıldığı zamanı tutar
+alert_resend_after = None   # Bir sonraki gönderim için belirlenen zamanı tutar
+
+
 app = Flask(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dbmonitor.sqlite3")

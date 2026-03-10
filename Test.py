@@ -2,8 +2,10 @@ import pyodbc
 import sqlite3
 import os
 import requests
+import app
 from datetime import datetime
 from dotenv import load_dotenv
+
 
 # .env dosyasından bağlantı bilgilerini yükle
 load_dotenv()
@@ -14,6 +16,8 @@ database = os.getenv('DB_NAME')
 username = os.getenv('DB_USER')
 password = os.getenv('DB_PASSWORD')
 driver   = os.getenv('DB_DRIVER', 'ODBC Driver 18 for SQL Server')
+
+
 
 if not all([server, database, username, password]):
     raise ValueError("❌ .env dosyasında eksik bağlantı bilgisi var! DB_SERVER, DB_NAME, DB_USER, DB_PASSWORD kontrol edin.")
@@ -52,7 +56,6 @@ def send_telegram_alert(score, penalties):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Aktif Alarmlar:</b>\n{penalty_lines}"
     )
-
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     for chat_id in recipients:
         try:
@@ -108,6 +111,7 @@ def save_to_sqlite(score, penalties):
 
 # --- ANA KONTROL FONKSİYONU ---
 def run_health_check_with_score():
+    global statu
     health_score = 100
     penalties = []
     
@@ -316,8 +320,31 @@ def run_health_check_with_score():
         
         save_to_sqlite(health_score, penalties)
 
+        if health_score >= 70:
+            # Sağlık düzeldi, flag ve zamanları sıfırla
+            app.current_message_statu = 0
+            app.alert_sent_time = None
+            app.alert_resend_after = None
+
         if health_score < TELEGRAM_THRESHOLD:
-            send_telegram_alert(health_score, penalties)
+            import random
+            from datetime import timedelta
+            now_dt = datetime.now()
+
+            # İlk mesaj veya bekleme süresi dolmuşsa gönder
+            should_send = (
+                app.current_message_statu == 0
+                or (app.alert_resend_after is not None and now_dt >= app.alert_resend_after)
+            )
+
+            if should_send:
+                send_telegram_alert(health_score, penalties)
+                app.current_message_statu = 1
+                app.alert_sent_time = now_dt
+                # Bir sonraki gönderiim için 1-3 saat arası rastgele bir süre belirle
+                wait_seconds = random.randint(1 * 3600, 3 * 3600)
+                app.alert_resend_after = now_dt + timedelta(seconds=wait_seconds)
+                print(f"🔔 Bir sonraki alarm gönderiimi için bekleme süresi: {wait_seconds // 3600:.1f} saat ({app.alert_resend_after.strftime('%H:%M:%S')})")
                 
         conn.close()
         
