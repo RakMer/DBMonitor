@@ -475,66 +475,91 @@ def cmd_startdb(message):
 
 @bot.message_handler(commands=["takebackup"])
 def take_backup(message):
-
-
-    zaman = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if not is_authorized(message):
+        return
 
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         bot.reply_to(
             message,
-            "⚠️ <b>Kullanım:</b> <code>/startdb [veritabani_adi]</code>",
-            parse_mode="HTML",   
+            "⚠️ <b>Kullanım:</b> <code>/takebackup [veritabani_adi]</code>",
+            parse_mode="HTML",
         )
         return
 
     db_name = validate_db_name(args[1])
     if not db_name:
-        bot.reply_to(message,"⚠️ Geçersiz Veritabanı adı!",parse_mode="HTML")
+        bot.reply_to(message, "⚠️ Geçersiz Veritabanı adı!", parse_mode="HTML")
         return
     if is_protected(db_name):
-        bot.reply_to(message,"🛡️ <b>Reddedildi!</b>\n<code>{db_name}</code> bir sistem veritabanıdır.",
-                     parse_mode="HTML")
+        bot.reply_to(
+            message,
+            f"🛡️ <b>Reddedildi!</b>\n<code>{db_name}</code> bir sistem veritabanıdır.",
+            parse_mode="HTML",
+        )
         return
+
+    backup_dir = os.getenv("BACKUP_DIR", r"C:\\Backups")
+    os.makedirs(backup_dir, exist_ok=True)
+
     conn = get_db_connection()
     if not conn:
-        bot.reply(message,"❌ Veritabanı sunucusuna bağlanılamadı!", parse_mode="HTML")
+        bot.reply_to(message, "❌ Veritabanı sunucusuna bağlanılamadı!", parse_mode="HTML")
         return
+
     try:
         cursor = conn.cursor()
         conn.autocommit = True
         zaman = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_yolu = f"C:\\Backups\\{db_name}_{zaman}.bak"
-        bekleme_mesaji = bot.reply_to(message, f"⏳ <b>{db_name}</b> yedekleniyor, lütfen bekleyin...", parse_mode="HTML")
+        backup_yolu = os.path.join(backup_dir, f"{db_name}_{zaman}.bak")
 
-        # 3. SQL yedekleme komutunu çalıştır
-        cursor.execute(f"BACKUP DATABASE [{db_name}] TO DISK = '{backup_yolu}' WITH COMPRESSION, INIT")
+        bekleme_mesaji = bot.reply_to(
+            message,
+            f"⏳ <b>{db_name}</b> yedekleniyor, lütfen bekleyin...",
+            parse_mode="HTML",
+        )
 
-        # PYODBC HAYAT KURTARAN DOKUNUŞ: 
-        # SQL'in ürettiği "Yüzde 10 tamamlandı" gibi mesajları tüketiyoruz ki dosya diske tam yazılabilsin.
+        # 3. SQL yedekleme komutunu çalıştır (sıkıştırmalı tam yedek)
+        cursor.execute(
+            f"BACKUP DATABASE [{db_name}] TO DISK = ? WITH COMPRESSION, INIT",
+            (backup_yolu,),
+        )
+
+        # SQL'in ürettiği ilerleme mesajlarını tüket
         while cursor.nextset():
             pass
 
-        # 4. İşlem bittikten sonra diske gidip dosyanın gerçekten oluştuğunu DOĞRULAYALIM
+        # Dosya oluştu mu, boyut nedir kontrol et
         if os.path.exists(backup_yolu):
             dosya_boyutu_mb = os.path.getsize(backup_yolu) / (1024 * 1024)
             bot.edit_message_text(
                 chat_id=message.chat.id,
                 message_id=bekleme_mesaji.message_id,
-                text=f"✅ <b>{db_name}</b> başarıyla yedeklendi ve doğrulandı!\n📂 <b>Yol:</b> <code>{backup_yolu}</code>\n📦 <b>Boyut:</b> {dosya_boyutu_mb:.2f} MB",
-                parse_mode="HTML"
+                text=(
+                    f"✅ <b>{db_name}</b> başarıyla yedeklendi!\n"
+                    f"📂 <b>Yol:</b> <code>{backup_yolu}</code>\n"
+                    f"📦 <b>Boyut:</b> {dosya_boyutu_mb:.2f} MB"
+                ),
+                parse_mode="HTML",
             )
         else:
             bot.edit_message_text(
                 chat_id=message.chat.id,
                 message_id=bekleme_mesaji.message_id,
-                text=f"❌ SQL hata vermedi ancak yedek dosyası (<code>{backup_yolu}</code>) diskte bulunamadı! (Bot ve SQL aynı sunucuda mı?)",
-                parse_mode="HTML"
+                text=(
+                    "❌ SQL hata vermedi ancak yedek dosyası bulunamadı. "
+                    "Bot ve SQL aynı sunucuda mı?"
+                ),
+                parse_mode="HTML",
             )
 
     except pyodbc.Error as e:
         bot.reply_to(message, f"❌ <b>SQL Hatası:</b>\n<code>{e}</code>", parse_mode="HTML")
-        # logger.error(f"❌ /takebackup {db_name} SQL hatası: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 @bot.message_handler(commands=["restartdb"])
 def cmd_restartdb(message):
@@ -643,6 +668,8 @@ def cmd_restartdb(message):
 
 @bot.message_handler(commands=["check"])
 def check(message):
+    if not is_authorized(message):
+        return
     Test.run_health_check_with_score()
     
 

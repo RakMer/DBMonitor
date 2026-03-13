@@ -111,7 +111,6 @@ def save_to_sqlite(score, penalties):
 
 # --- ANA KONTROL FONKSİYONU ---
 def run_health_check_with_score():
-    global statu
     health_score = 100
     penalties = []
     
@@ -302,18 +301,22 @@ def run_health_check_with_score():
         log_spaces = cursor.fetchall()
         
         bad_log_count = 0
+        last_used_pct = None
         for log in log_spaces:
             db_name = log[0]
-            used_pct = float(log[2]) # Log Space Used (%) kolonu
+            used_pct = float(log[2])  # Log Space Used (%) kolonu
+            last_used_pct = used_pct
             
             if used_pct >= 90:
                 health_score -= 30
                 penalties.append(f"[-30] Log Dosyası Riski: {db_name} veritabanının işlem günlüğü (Log) %{used_pct:.2f} dolu!")
                 print(f"🔴 LOG KRİTİK: {db_name} Log Dosyası %{used_pct:.2f} dolu!")
                 bad_log_count += 1
-                
-        if bad_log_count == 0:
-            print(f"🟢 LOG SPACE: Tüm veritabanlarının log doluluk oranları güvenli seviyede. Doluluk oranı: {int(used_pct)}")
+
+        if not log_spaces:
+            print("🟢 LOG SPACE: Log doluluk sorgusu boş döndü (kontrol edilecek veri yok).")
+        elif bad_log_count == 0:
+            print(f"🟢 LOG SPACE: Tüm veritabanlarının log doluluk oranları güvenli seviyede. Son okunan doluluk: %{int(last_used_pct)}")
 
         print("=" * 50)
         print(f"🏆 GÜNCEL SUNUCU SAĞLIK SKORU: {health_score} / 100")
