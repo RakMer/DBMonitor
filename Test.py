@@ -24,7 +24,7 @@ if not all([server, database, username, password]):
 
 conn_str = f'DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};PWD={password};TrustServerCertificate=yes;'
 
-TELEGRAM_THRESHOLD     = int(os.getenv('TELEGRAM_ALERT_THRESHOLD', 70))
+TELEGRAM_THRESHOLD     = int(os.getenv("TELEGRAM_THRESHOLD") or os.getenv("TELEGRAM_ALERT_THRESHOLD") or 70)
 DISK_WARN_PCT          = float(os.getenv('DISK_WARN_PCT', 80))
 DISK_CRIT_PCT          = float(os.getenv('DISK_CRIT_PCT', 90))
 LOG_USED_CRIT_PCT      = float(os.getenv('LOG_USED_CRIT_PCT', 70))
