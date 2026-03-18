@@ -24,7 +24,14 @@ if not all([server, database, username, password]):
 
 conn_str = f'DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};PWD={password};TrustServerCertificate=yes;'
 
-TELEGRAM_THRESHOLD = int(os.getenv('TELEGRAM_ALERT_THRESHOLD', 70))
+TELEGRAM_THRESHOLD     = int(os.getenv('TELEGRAM_ALERT_THRESHOLD', 70))
+DISK_WARN_PCT          = float(os.getenv('DISK_WARN_PCT', 80))
+DISK_CRIT_PCT          = float(os.getenv('DISK_CRIT_PCT', 90))
+LOG_USED_CRIT_PCT      = float(os.getenv('LOG_USED_CRIT_PCT', 70))
+FAILED_LOGIN_ALERT     = int(os.getenv('FAILED_LOGIN_ALERT', 10))
+FAILED_LOGIN_WINDOW_HOURS = int(os.getenv('FAILED_LOGIN_WINDOW_HOURS', 24))
+BACKUP_MAX_AGE_HOURS   = int(os.getenv('BACKUP_MAX_AGE_HOURS', 24))
+SYSADMIN_MAX_COUNT     = int(os.getenv('SYSADMIN_MAX_COUNT', 2))
 
 # --- TELEGRAM BİLDİRİM FONKSİYONU ---
 def send_telegram_alert(score, penalties):
@@ -144,10 +151,13 @@ def run_health_check_with_score():
                 print(f"🔴 Sorunlu Veritabanı: {db[0]} ({db[1]})")
 
         # 3. Yedekleme Kontrolü
-        backup_query = """
+        backup_query = f"""
         SELECT d.name 
         FROM sys.databases d
-        LEFT JOIN msdb.dbo.backupset b ON d.name = b.database_name AND b.type = 'D' AND b.backup_finish_date >= GETDATE() - 1
+        LEFT JOIN msdb.dbo.backupset b 
+            ON d.name = b.database_name 
+           AND b.type = 'D' 
+           AND b.backup_finish_date >= DATEADD(HOUR, -{BACKUP_MAX_AGE_HOURS}, GETDATE())
         WHERE d.name NOT IN ('tempdb') AND b.backup_finish_date IS NULL
         """
         cursor.execute(backup_query)
@@ -176,11 +186,11 @@ def run_health_check_with_score():
             free_pct = disk[1]
             used_pct = 100 - free_pct
             
-            if used_pct >= 90:
+            if used_pct >= DISK_CRIT_PCT:
                 health_score -= 40
                 penalties.append(f"[-40] {drive_letter} diski kritik seviyede dolu! (%{used_pct:.2f})")
                 print(f"🔴 DİSK KRİTİK: {drive_letter} %{used_pct:.2f} Dolu!")
-            elif used_pct >= 80:
+            elif used_pct >= DISK_WARN_PCT:
                 health_score -= 10 
                 penalties.append(f"[-10] {drive_letter} diski dolmaya yaklaşıyor! (%{used_pct:.2f})")
             else:
@@ -222,28 +232,28 @@ def run_health_check_with_score():
         cursor.execute(sysadmin_query)
         sysadmins = cursor.fetchall()
         
-        if len(sysadmins) > 2:
+        if len(sysadmins) > SYSADMIN_MAX_COUNT:
             health_score -= 10
             penalties.append(f"[-10] Güvenlik Riski: Çok fazla 'sysadmin' yetkili kullanıcı var! ({len(sysadmins)} ekstra hesap)")
             print(f"🔴 SECURITY: Çok fazla sysadmin yetkisi! ({len(sysadmins)} ekstra hesap)")
         else:
             print("🟢 SECURITY: Sysadmin hesap sayısı normal.")
 
-        failed_login_query = """
+        failed_login_query = f"""
         SET NOCOUNT ON;
         DECLARE @ErrorLog TABLE (LogDate DATETIME, ProcessInfo NVARCHAR(100), Text NVARCHAR(MAX));
         INSERT INTO @ErrorLog EXEC sys.xp_readerrorlog 0, 1, N'Login failed';
-        SELECT COUNT(*) FROM @ErrorLog WHERE LogDate >= GETDATE() - 1;
+        SELECT COUNT(*) FROM @ErrorLog WHERE LogDate >= DATEADD(HOUR, -{FAILED_LOGIN_WINDOW_HOURS}, GETDATE());
         """
         cursor.execute(failed_login_query)
         failed_login_count = cursor.fetchone()[0]
 
-        if failed_login_count > 10:
+        if failed_login_count > FAILED_LOGIN_ALERT:
             health_score -= 15
-            penalties.append(f"[-15] Güvenlik İhlali: Son 24 saatte {failed_login_count} adet başarısız giriş (Login Failed) tespit edildi!")
+            penalties.append(f"[-15] Güvenlik İhlali: Son {FAILED_LOGIN_WINDOW_HOURS} saatte {failed_login_count} adet başarısız giriş (Login Failed) tespit edildi!")
             print(f"🔴 SECURITY: Brute-force/Login tehlikesi! ({failed_login_count} deneme)")
         elif failed_login_count > 0:
-            print(f"🟡 SECURITY: Son 24 saatte {failed_login_count} adet hatalı giriş yapılmış.")
+            print(f"🟡 SECURITY: Son {FAILED_LOGIN_WINDOW_HOURS} saatte {failed_login_count} adet hatalı giriş yapılmış.")
         else:
             print("🟢 SECURITY: Şüpheli giriş denemesi yok.")
 
@@ -307,7 +317,7 @@ def run_health_check_with_score():
             used_pct = float(log[2])  # Log Space Used (%) kolonu
             last_used_pct = used_pct
             
-            if used_pct >= 90:
+            if used_pct >= LOG_USED_CRIT_PCT:
                 health_score -= 30
                 penalties.append(f"[-30] Log Dosyası Riski: {db_name} veritabanının işlem günlüğü (Log) %{used_pct:.2f} dolu!")
                 print(f"🔴 LOG KRİTİK: {db_name} Log Dosyası %{used_pct:.2f} dolu!")

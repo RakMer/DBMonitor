@@ -145,6 +145,14 @@ DB_DRIVER=ODBC Driver 18 for SQL Server
 TELEGRAM_TOKEN=<BotFather'dan alınan token>
 TELEGRAM_CHAT_IDS=111111111,222222222   # Virgülle ayrılmış yetkili Chat ID'ler
 TELEGRAM_ALERT_THRESHOLD=70             # Bu skorun altına düşünce bildirim gönderilir
+BACKUP_DIR=C:\\Backups                 # /takebackup için yedeklerin yazılacağı klasör (opsiyonel, yoksa C:\Backups kullanılır)
+BACKUP_MAX_AGE_HOURS=24                 # Yedek kontrolü için maksimum yaş (saat)
+DISK_WARN_PCT=80                        # Disk doluluk uyarı eşiği (%)
+DISK_CRIT_PCT=90                        # Disk doluluk kritik eşiği (%)
+LOG_USED_CRIT_PCT=80                    # Log dosyası kritik doluluk eşiği (%)
+FAILED_LOGIN_ALERT=10                   # Bu sayının üstünde başarısız giriş varsa alarm yaz
+FAILED_LOGIN_WINDOW_HOURS=24            # Başarısız giriş sorgu penceresi (saat)
+SYSADMIN_MAX_COUNT=2                    # Ek sysadmin sayısı bu değeri aşarsa alarm yaz
 ```
 
 > ⚠️ `.env` dosyası `.gitignore` tarafından repo dışında tutulmaktadır. Asla commit etmeyin.
@@ -195,6 +203,8 @@ Bot yalnızca `.env` dosyasındaki `TELEGRAM_CHAT_IDS` listesindeki kullanıcıl
 | `/stopdb [db_adı]` | Veritabanını OFFLINE yapar |
 | `/startdb [db_adı]` | Veritabanını ONLINE yapar |
 | `/restartdb [db_adı]` | OFFLINE → 3s bekleme → ONLINE (yeniden başlatır) |
+| `/takebackup [db_adı]` | Veritabanının yedeğini alır (varsayılan klasör: C:\Backups) |
+| `/check` | Anlık sağlık kontrolünü tetikler ve skoru gönderir |
 
 > 🛡️ `master`, `tempdb`, `model`, `msdb` sistem veritabanlarına tüm komutlar engellenir.
 
