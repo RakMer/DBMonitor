@@ -784,6 +784,13 @@
     const scores = {{ chart_scores | tojson }};
     const historyData = {{ history | tojson }};
 
+    // Trend eksen sınırlarını veri tabanlı ayarla (negatif skorları da göster)
+    const hasScores = scores && scores.length > 0;
+    const minScore = hasScores ? Math.min(...scores) : 0;
+    const maxScore = hasScores ? Math.max(...scores) : 100;
+    const yMin = Math.min(0, minScore - 5);
+    const yMax = Math.max(100, maxScore + 5);
+
     // Sparkline setup
     const sparkCanvas = document.getElementById('sparklineChart');
     if (sparkCanvas) {
@@ -924,8 +931,8 @@
                     grid: { color: 'rgba(255,255,255,0.04)' }
                 },
                 y: {
-                    min: 0,
-                    max: 100,
+                    min: yMin,
+                    max: yMax,
                     ticks: {
                         color: '#8b8fa3',
                         stepSize: 10,
