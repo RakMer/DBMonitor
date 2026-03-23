@@ -3,6 +3,7 @@ import sqlite3
 import os
 import requests
 import app
+import re
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -32,6 +33,86 @@ FAILED_LOGIN_ALERT     = int(os.getenv('FAILED_LOGIN_ALERT', 10))
 FAILED_LOGIN_WINDOW_HOURS = int(os.getenv('FAILED_LOGIN_WINDOW_HOURS', 24))
 BACKUP_MAX_AGE_HOURS   = int(os.getenv('BACKUP_MAX_AGE_HOURS', 24))
 SYSADMIN_MAX_COUNT     = int(os.getenv('SYSADMIN_MAX_COUNT', 2))
+LONG_QUERY_SEC         = float(os.getenv('LONG_QUERY_SEC', 30))
+LARGE_QUERY_LOGICAL_READS = int(os.getenv('LARGE_QUERY_LOGICAL_READS', 1000000))
+QUERY_ANALYSIS_TOP_N   = int(os.getenv('QUERY_ANALYSIS_TOP_N', 5))
+SYSTEM_DATABASES       = {'master', 'model', 'msdb', 'tempdb'}
+
+
+def parse_bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+CHECK_SYSTEM_DB_BACKUP = parse_bool_env('CHECK_SYSTEM_DB_BACKUP', True)
+CHECK_SYSTEM_DB_AUTOGROWTH = parse_bool_env('CHECK_SYSTEM_DB_AUTOGROWTH', False)
+
+
+def sanitize_sql_text(text: str | None, max_len: int = 140) -> str:
+    if not text:
+        return ""
+    normalized = " ".join(text.split())
+    return normalized[:max_len] + ("..." if len(normalized) > max_len else "")
+
+
+def build_telegram_penalty_lines(penalties: list[str]) -> str:
+    if not penalties:
+        return "• Belirtilen ceza yok."
+
+    long_query_items = []
+    auto_growth_items = []
+    other_items = []
+
+    for p in penalties:
+        if "Uzun/Büyük Sorgu:" in p:
+            long_query_items.append(p)
+        elif "Auto Growth:" in p:
+            auto_growth_items.append(p)
+        else:
+            other_items.append(p)
+
+    lines = [f"• {item}" for item in other_items]
+
+    if long_query_items:
+        lines.append(f"• [-8] Uzun/Büyük Sorgu: {len(long_query_items)} adet")
+        for item in long_query_items[:2]:
+            db_match = re.search(r"DB=([^,]+)", item)
+            max_match = re.search(r"Max=([0-9.]+)s", item)
+            reads_match = re.search(r"AvgReads=([0-9]+)", item)
+            sql_match = re.search(r"SQL='(.+)'$", item)
+
+            db_name = db_match.group(1) if db_match else "unknown"
+            max_sec = max_match.group(1) if max_match else "?"
+            avg_reads = reads_match.group(1) if reads_match else "?"
+            sql_short = sanitize_sql_text(sql_match.group(1), 70) if sql_match else "SQL bilgisi yok"
+            lines.append(f"  - DB={db_name} | Max={max_sec}s | AvgReads={avg_reads} | SQL='{sql_short}'")
+
+        if len(long_query_items) > 2:
+            lines.append(f"  - +{len(long_query_items) - 2} adet daha")
+
+    if auto_growth_items:
+        lines.append(f"• [-10] Auto Growth: {len(auto_growth_items)} dosya")
+        for item in auto_growth_items[:2]:
+            ag_match = re.search(r"Auto Growth: (.+?) veritabanının '(.+?)' dosyası", item)
+            if ag_match:
+                db_name = ag_match.group(1)
+                file_name = ag_match.group(2)
+                lines.append(f"  - {db_name}.{file_name}")
+            else:
+                lines.append(f"  - {sanitize_sql_text(item, 90)}")
+
+        if len(auto_growth_items) > 2:
+            lines.append(f"  - +{len(auto_growth_items) - 2} dosya daha")
+
+    max_lines = 14
+    if len(lines) > max_lines:
+        hidden = len(lines) - max_lines
+        lines = lines[:max_lines]
+        lines.append(f"• ... ve {hidden} satır daha")
+
+    return "\n".join(lines)
 
 # --- TELEGRAM BİLDİRİM FONKSİYONU ---
 def send_telegram_alert(score, penalties):
@@ -43,7 +124,7 @@ def send_telegram_alert(score, penalties):
 
     recipients = [cid.strip() for cid in chat_ids.split(',') if cid.strip()]
 
-    penalty_lines = "\n".join(f"• {p}" for p in penalties) if penalties else "• Belirtilen ceza yok."
+    penalty_lines = build_telegram_penalty_lines(penalties)
 
     if score >= 80:
         status_emoji = "✅"
@@ -151,6 +232,11 @@ def run_health_check_with_score():
                 print(f"🔴 Sorunlu Veritabanı: {db[0]} ({db[1]})")
 
         # 3. Yedekleme Kontrolü
+        backup_excluded_dbs = {'tempdb'}
+        if not CHECK_SYSTEM_DB_BACKUP:
+            backup_excluded_dbs.update(SYSTEM_DATABASES)
+        excluded_db_sql = ", ".join(f"'{db}'" for db in sorted(backup_excluded_dbs))
+
         backup_query = f"""
         SELECT d.name 
         FROM sys.databases d
@@ -158,7 +244,7 @@ def run_health_check_with_score():
             ON d.name = b.database_name 
            AND b.type = 'D' 
            AND b.backup_finish_date >= DATEADD(HOUR, -{BACKUP_MAX_AGE_HOURS}, GETDATE())
-        WHERE d.name NOT IN ('tempdb') AND b.backup_finish_date IS NULL
+        WHERE d.name NOT IN ({excluded_db_sql}) AND b.backup_finish_date IS NULL
         """
         cursor.execute(backup_query)
         missing_backups = cursor.fetchall()
@@ -219,6 +305,66 @@ def run_health_check_with_score():
             for block in blocks:
                 health_score -= 10
                 penalties.append(f"[-10] Session {block[0]}, Session {block[1]} tarafından {block[2]} saniyedir bloklanıyor!")
+
+        # 6.1 Uzun Süren ve Büyük Sorgular (Query Stats)
+        top_n = max(1, min(QUERY_ANALYSIS_TOP_N, 20))
+        query_stats_sql = f"""
+        SELECT TOP ({top_n})
+            COALESCE(DB_NAME(st.dbid), DB_NAME(pa.plan_dbid), 'unknown') AS db_name,
+            (CAST(qs.max_elapsed_time AS FLOAT) / 1000000.0) AS max_elapsed_sec,
+            (CAST(qs.total_logical_reads AS FLOAT) / NULLIF(qs.execution_count, 0)) AS avg_logical_reads,
+            qs.execution_count,
+            qs.last_execution_time,
+            SUBSTRING(
+                st.text,
+                (qs.statement_start_offset / 2) + 1,
+                (
+                    (
+                        CASE qs.statement_end_offset
+                            WHEN -1 THEN DATALENGTH(st.text)
+                            ELSE qs.statement_end_offset
+                        END - qs.statement_start_offset
+                    ) / 2
+                ) + 1
+            ) AS query_text
+        FROM sys.dm_exec_query_stats qs
+        CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+        OUTER APPLY (
+            SELECT TOP (1) TRY_CONVERT(INT, pa.value) AS plan_dbid
+            FROM sys.dm_exec_plan_attributes(qs.plan_handle) pa
+            WHERE pa.attribute = 'dbid'
+        ) pa
+        WHERE qs.execution_count > 0
+        ORDER BY qs.max_elapsed_time DESC
+        """
+        try:
+            cursor.execute(query_stats_sql)
+            heavy_queries = cursor.fetchall()
+
+            matched_queries = []
+            for q in heavy_queries:
+                q_max_sec = float(q[1] or 0)
+                q_avg_reads = float(q[2] or 0)
+                if q_max_sec >= LONG_QUERY_SEC or q_avg_reads >= LARGE_QUERY_LOGICAL_READS:
+                    matched_queries.append(q)
+
+            if matched_queries:
+                print(f"🔴 QUERY STATS: {len(matched_queries)} adet uzun/büyük sorgu tespit edildi.")
+                for q in matched_queries:
+                    q_db_name = q[0] or "unknown"
+                    q_max_sec = float(q[1] or 0)
+                    q_avg_reads = int(float(q[2] or 0))
+                    q_exec_count = int(q[3] or 0)
+                    q_snippet = sanitize_sql_text(q[5])
+
+                    health_score -= 8
+                    penalties.append(
+                        f"[-8] Uzun/Büyük Sorgu: DB={q_db_name}, Max={q_max_sec:.1f}s, AvgReads={q_avg_reads}, Exec={q_exec_count}, SQL='{q_snippet}'"
+                    )
+            else:
+                print("🟢 QUERY STATS: Uzun süre çalışan veya büyük sorgu bulunamadı.")
+        except pyodbc.Error as e:
+            print(f"⚠️ QUERY STATS: Sorgu analizi atlandı (yetki/erişim sorunu olabilir): {e}")
 
         # 7. Güvenlik ve Denetim Kontrolü
         sysadmin_query = """
@@ -286,11 +432,16 @@ def run_health_check_with_score():
         growth_files = cursor.fetchall()
         
         bad_growth_count = 0
+        skipped_system_growth = 0
         for f in growth_files:
             db_name = f[0]
             file_name = f[1]
             is_pct = f[2]
             growth_pages = f[3]
+
+            if (not CHECK_SYSTEM_DB_AUTOGROWTH) and db_name and db_name.lower() in SYSTEM_DATABASES:
+                skipped_system_growth += 1
+                continue
             
             if is_pct == 1 and growth_pages > 0:
                 health_score -= 10
@@ -305,6 +456,9 @@ def run_health_check_with_score():
             print(f"🔴 AUTO GROWTH: {bad_growth_count} adet dosyada yanlış büyüme ayarı var (Performans Riski)!")
         else:
             print("🟢 AUTO GROWTH: Veritabanı büyüme ayarları stabil.")
+
+        if skipped_system_growth > 0:
+            print(f"ℹ️ AUTO GROWTH: {skipped_system_growth} sistem DB dosyası (CHECK_SYSTEM_DB_AUTOGROWTH=0) ceza hesaplamasından hariç tutuldu.")
 
         # 10. LOG FILE RISK CHECK (YENİ EKLENDİ)
         cursor.execute("DBCC SQLPERF(LOGSPACE);")

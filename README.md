@@ -40,14 +40,15 @@ DB Monitor, hedef MSSQL sunucusuna bağlanarak 10 farklı kritik metriği analiz
 | 7 | Sysadmin hesap sayısı ve brute-force tespiti | -10 / -15 puan |
 | 8 | Başarısız SQL Agent Job'ları | -15 puan / job |
 | 9 | Yanlış Auto Growth ayarları | -10 puan / dosya |
-| 10 | Log dosyası doluluk oranı (≥%90) | -30 puan |
+| 10 | Log dosyası doluluk oranı (varsayılan kritik eşik: ≥%70) | -30 puan |
 
 ### 📊 Web Dashboard (`app.py` + `templates/index.html`)
 - **Dinamik Skor Halkası** — Skora göre Yeşil / Sarı / Kırmızı tema
 - **Aktif Alarmlar** — Anlık ceza logları listesi
-- **Trend Grafiği** — Chart.js ile son 20 kontrolün zaman serisi
+- **Trend Grafiği** — Chart.js ile son 200 kontrolün zaman serisi
 - **Geçmiş Tablosu** — Tüm kontrol kayıtları ve ceza detayları
 - **Otomatik Yenileme** — 60 saniyede bir sayfa güncellenir
+- **Opsiyonel Basic Auth** — `DASHBOARD_USER` ve `DASHBOARD_PASS` tanımlanırsa giriş zorunlu olur
 
 ### 🤖 Telegram Entegrasyonu (`telegram_listener.py`)
 - **Tek Yönlü Bildirim** — Skor eşik değerinin altına düşünce otomatik alarm mesajı
@@ -144,16 +145,22 @@ DB_DRIVER=ODBC Driver 18 for SQL Server
 # Telegram Bildirim
 TELEGRAM_TOKEN=<BotFather'dan alınan token>
 TELEGRAM_CHAT_IDS=111111111,222222222   # Virgülle ayrılmış yetkili Chat ID'ler
-TELEGRAM_ALERT_THRESHOLD=70             # Bu skorun altına düşünce bildirim gönderilir
+TELEGRAM_THRESHOLD=70                   # Bu skorun altına düşünce bildirim gönderilir
 BACKUP_DIR=C:\\Backups                 # /takebackup için yedeklerin yazılacağı klasör (opsiyonel, yoksa C:\Backups kullanılır)
 BACKUP_MAX_AGE_HOURS=24                 # Yedek kontrolü için maksimum yaş (saat)
 DISK_WARN_PCT=80                        # Disk doluluk uyarı eşiği (%)
 DISK_CRIT_PCT=90                        # Disk doluluk kritik eşiği (%)
-LOG_USED_CRIT_PCT=80                    # Log dosyası kritik doluluk eşiği (%)
+LOG_USED_CRIT_PCT=70                    # Log dosyası kritik doluluk eşiği (%)
 FAILED_LOGIN_ALERT=10                   # Bu sayının üstünde başarısız giriş varsa alarm yaz
 FAILED_LOGIN_WINDOW_HOURS=24            # Başarısız giriş sorgu penceresi (saat)
 SYSADMIN_MAX_COUNT=2                    # Ek sysadmin sayısı bu değeri aşarsa alarm yaz
+
+# Dashboard Basic Auth (opsiyonel)
+DASHBOARD_USER=admin
+DASHBOARD_PASS=guclu_sifre
 ```
+
+> Not: Geriye dönük uyumluluk için `TELEGRAM_ALERT_THRESHOLD` anahtarı da desteklenir.
 
 > ⚠️ `.env` dosyası `.gitignore` tarafından repo dışında tutulmaktadır. Asla commit etmeyin.
 
@@ -172,6 +179,8 @@ Her çalıştırmada MSSQL sunucusu analiz edilir, sonuçlar `dbmonitor.sqlite3`
 python app.py
 ```
 Tarayıcıda **http://127.0.0.1:5050** adresini aç.
+
+Eğer `DASHBOARD_USER` ve `DASHBOARD_PASS` tanımlıysa, dashboard açılışında Basic Auth giriş ekranı gelir.
 
 ### Telegram bot dinleyicisini başlat
 ```bash
@@ -260,6 +269,24 @@ CREATE TABLE PenaltyLog (
 - Yetkisiz erişim denemeleri loglanır
 - SQL Injection koruması: komut argümanlarında tehlikeli karakterler filtrelenir
 - Sistem veritabanlarına (`master`, `tempdb`, `model`, `msdb`) uzaktan müdahale engellenir
+
+## ⚙️ Dashboard Ayar API'si
+
+Dashboard, çalışma zamanında bazı eşik değerlerinin güncellenmesi için bir API sunar:
+
+- `GET /api/settings` → Aktif ayarları döner
+- `GET /api/settings?defaults=1` → Varsayılan ayarları döner
+- `POST /api/settings` → Ayarları günceller
+
+Örnek istek:
+
+```bash
+curl -X POST http://127.0.0.1:5050/api/settings \
+    -H "Content-Type: application/json" \
+    -d '{"DISK_WARN_PCT": 82, "DISK_CRIT_PCT": 92, "TELEGRAM_THRESHOLD": 65}'
+```
+
+> Basic Auth aktifse API çağrılarında da kimlik doğrulama gerekir.
 
 ---
 

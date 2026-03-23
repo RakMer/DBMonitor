@@ -614,6 +614,14 @@
                 <label class="form-label text-secondary small">Sysadmin Max Sayı</label>
                 <input id="set-sysadmin" type="number" class="form-control bg-dark text-light" min="1" step="1">
             </div>
+            <div class="col-6">
+                <label class="form-label text-secondary small">Uzun Sorgu Eşik (sn)</label>
+                <input id="set-long-query-sec" type="number" class="form-control bg-dark text-light" min="1" step="1">
+            </div>
+            <div class="col-6">
+                <label class="form-label text-secondary small">Büyük Sorgu Eşik (logical reads)</label>
+                <input id="set-large-query-reads" type="number" class="form-control bg-dark text-light" min="1" step="1">
+            </div>
         </div>
         <div class="d-flex align-items-center gap-3 mt-3">
             <button id="reset-defaults" class="btn btn-sm btn-outline-warning">
@@ -675,6 +683,8 @@
         FAILED_LOGIN_WINDOW_HOURS: document.getElementById('set-failed-window'),
         BACKUP_MAX_AGE_HOURS: document.getElementById('set-backup-age'),
         SYSADMIN_MAX_COUNT: document.getElementById('set-sysadmin'),
+        LONG_QUERY_SEC: document.getElementById('set-long-query-sec'),
+        LARGE_QUERY_LOGICAL_READS: document.getElementById('set-large-query-reads'),
     };
     const settingsStatus = document.getElementById('settings-status');
     const saveBtn = document.getElementById('save-settings');
