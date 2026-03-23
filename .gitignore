@@ -3,7 +3,7 @@ DBvenv/
 
 # Hassas bilgiler
 .env
-
+.TooDoo.md
 # SQLite veritabanı
 dbmonitor.sqlite3
 
