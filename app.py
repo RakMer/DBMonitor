@@ -174,11 +174,18 @@ def get_run_check_state():
 
 def run_check_worker():
     try:
+        child_env = os.environ.copy()
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["PYTHONUTF8"] = "1"
+
         proc = subprocess.run(
             [sys.executable, TEST_SCRIPT_PATH],
             cwd=BASE_DIR,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=child_env,
             timeout=180,
         )
         if proc.returncode != 0:
