@@ -211,6 +211,32 @@ def init_sqlite_db():
             UNIQUE(snapshot_time, db_name)
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS WaitSnapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_time TEXT NOT NULL,
+            wait_type TEXT NOT NULL,
+            wait_time_ms_total INTEGER,
+            signal_wait_ms_total INTEGER,
+            waiting_tasks_count_total INTEGER,
+            category TEXT,
+            UNIQUE(snapshot_time, wait_type)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ActiveWaitSnapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_time TEXT NOT NULL,
+            session_id INTEGER,
+            db_name TEXT,
+            wait_type TEXT,
+            wait_time_ms INTEGER,
+            blocking_session_id INTEGER,
+            category TEXT
+        )
+    ''')
     
     conn.commit()
     conn.close()
@@ -235,6 +261,162 @@ def is_database_monitored(db_name, monitored_db_set):
     if not db_name:
         return False
     return str(db_name).lower() in monitored_db_set
+
+
+def classify_wait_type(wait_type: str | None) -> str:
+    if not wait_type:
+        return "Other"
+    wt = wait_type.upper()
+    if wt.startswith("LCK_"):
+        return "Lock"
+    if wt.startswith("PAGEIOLATCH") or wt.startswith("IO_") or wt in {"WRITELOG", "ASYNC_IO_COMPLETION"}:
+        return "Disk I/O"
+    if wt.startswith("NETWORK") or wt in {"ASYNC_NETWORK_IO", "TRACEWRITE"}:
+        return "Network"
+    if wt.startswith("CX") or wt.startswith("SOS_SCHEDULER") or wt.startswith("THREADPOOL"):
+        return "CPU/Scheduler"
+    if wt.startswith("RESOURCE_SEMAPHORE") or wt.startswith("MEMORY_"):
+        return "Memory"
+    return "Other"
+
+
+def collect_wait_metrics(cursor):
+    snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    ignore_waits = {
+        'BROKER_EVENTHANDLER', 'BROKER_RECEIVE_WAITFOR', 'BROKER_TASK_STOP',
+        'BROKER_TO_FLUSH', 'BROKER_TRANSMITTER', 'CHECKPOINT_QUEUE',
+        'CHKPT', 'CLR_AUTO_EVENT', 'CLR_MANUAL_EVENT', 'CLR_SEMAPHORE',
+        'DBMIRROR_DBM_EVENT', 'DBMIRROR_EVENTS_QUEUE', 'DBMIRROR_WORKER_QUEUE',
+        'DBMIRRORING_CMD', 'DIRTY_PAGE_POLL', 'DISPATCHER_QUEUE_SEMAPHORE',
+        'EXECSYNC', 'FSAGENT', 'FT_IFTS_SCHEDULER_IDLE_WAIT', 'FT_IFTSHC_MUTEX',
+        'HADR_CLUSAPI_CALL', 'HADR_FILESTREAM_IOMGR_IOCOMPLETION',
+        'HADR_LOGCAPTURE_WAIT', 'HADR_NOTIFICATION_DEQUEUE', 'HADR_TIMER_TASK',
+        'HADR_WORK_QUEUE', 'KSOURCE_WAKEUP', 'LAZYWRITER_SLEEP',
+        'LOGMGR_QUEUE', 'MEMORY_ALLOCATION_EXT', 'ONDEMAND_TASK_QUEUE',
+        'PARALLEL_REDO_DRAIN_WORKER', 'PARALLEL_REDO_LOG_CACHE',
+        'PARALLEL_REDO_TRAN_LIST', 'PARALLEL_REDO_WORKER_SYNC',
+        'PARALLEL_REDO_WORKER_WAIT_WORK', 'PREEMPTIVE_OS_FLUSHFILEBUFFERS',
+        'PREEMPTIVE_XE_GETTARGETSTATE', 'PWAIT_ALL_COMPONENTS_INITIALIZED',
+        'PWAIT_DIRECTLOGCONSUMER_GETNEXT', 'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP',
+        'QDS_ASYNC_QUEUE', 'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',
+        'QDS_SHUTDOWN_QUEUE', 'REDO_THREAD_PENDING_WORK', 'REQUEST_FOR_DEADLOCK_SEARCH',
+        'RESOURCE_QUEUE', 'SERVER_IDLE_CHECK', 'SLEEP_BPOOL_FLUSH', 'SLEEP_DBSTARTUP',
+        'SLEEP_DCOMSTARTUP', 'SLEEP_MASTERDBREADY', 'SLEEP_MASTERMDREADY',
+        'SLEEP_MASTERUPGRADED', 'SLEEP_MSDBSTARTUP', 'SLEEP_SYSTEMTASK',
+        'SLEEP_TASK', 'SLEEP_TEMPDBSTARTUP', 'SNI_HTTP_ACCEPT', 'SP_SERVER_DIAGNOSTICS_SLEEP',
+        'SQLTRACE_BUFFER_FLUSH', 'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', 'SQLTRACE_WAIT_ENTRIES',
+        'WAIT_FOR_RESULTS', 'WAITFOR', 'WAITFOR_TASKSHUTDOWN', 'WAIT_XTP_RECOVERY',
+        'WAIT_XTP_HOST_WAIT', 'WAIT_XTP_OFFLINE_CKPT_NEW_LOG', 'WAIT_XTP_CKPT_CLOSE',
+        'XE_DISPATCHER_JOIN', 'XE_DISPATCHER_WAIT', 'XE_TIMER_EVENT'
+    }
+
+    cumulative_waits = []
+    try:
+        cursor.execute("""
+            SELECT wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms
+            FROM sys.dm_os_wait_stats
+            WHERE wait_type NOT IN ({})
+        """.format(
+            ",".join(["?"] * len(ignore_waits))
+        ), tuple(sorted(ignore_waits)))
+
+        for wt, task_cnt, wait_ms, signal_ms in cursor.fetchall():
+            cumulative_waits.append(
+                {
+                    "wait_type": wt,
+                    "waiting_tasks_count_total": int(task_cnt or 0),
+                    "wait_time_ms_total": int(wait_ms or 0),
+                    "signal_wait_ms_total": int(signal_ms or 0),
+                    "category": classify_wait_type(wt),
+                }
+            )
+    except Exception:
+        cumulative_waits = []
+
+    active_waits = []
+    try:
+        cursor.execute("""
+            SELECT
+                r.session_id,
+                DB_NAME(r.database_id) AS db_name,
+                r.wait_type,
+                r.wait_time,
+                r.blocking_session_id
+            FROM sys.dm_exec_requests r
+            WHERE r.session_id <> @@SPID
+              AND r.wait_type IS NOT NULL
+              AND r.wait_time > 0
+        """)
+        for sid, db_name, wait_type, wait_ms, blocking_sid in cursor.fetchall():
+            active_waits.append(
+                {
+                    "session_id": int(sid or 0),
+                    "db_name": db_name or "unknown",
+                    "wait_type": wait_type or "UNKNOWN",
+                    "wait_time_ms": int(wait_ms or 0),
+                    "blocking_session_id": int(blocking_sid or 0),
+                    "category": classify_wait_type(wait_type),
+                }
+            )
+    except Exception:
+        active_waits = []
+
+    return {
+        "snapshot_time": snapshot_time,
+        "cumulative_waits": cumulative_waits,
+        "active_waits": active_waits,
+    }
+
+
+def save_wait_metrics(wait_snapshot):
+    conn = sqlite3.connect('dbmonitor.sqlite3')
+    cursor = conn.cursor()
+
+    for row in wait_snapshot.get("cumulative_waits", []):
+        cursor.execute(
+            """
+            INSERT INTO WaitSnapshots (
+                snapshot_time, wait_type, wait_time_ms_total, signal_wait_ms_total,
+                waiting_tasks_count_total, category
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_time, wait_type) DO UPDATE SET
+                wait_time_ms_total = excluded.wait_time_ms_total,
+                signal_wait_ms_total = excluded.signal_wait_ms_total,
+                waiting_tasks_count_total = excluded.waiting_tasks_count_total,
+                category = excluded.category
+            """,
+            (
+                wait_snapshot["snapshot_time"],
+                row["wait_type"],
+                row["wait_time_ms_total"],
+                row["signal_wait_ms_total"],
+                row["waiting_tasks_count_total"],
+                row["category"],
+            ),
+        )
+
+    cursor.execute("DELETE FROM ActiveWaitSnapshots WHERE snapshot_time = ?", (wait_snapshot["snapshot_time"],))
+    for row in wait_snapshot.get("active_waits", []):
+        cursor.execute(
+            """
+            INSERT INTO ActiveWaitSnapshots (
+                snapshot_time, session_id, db_name, wait_type, wait_time_ms, blocking_session_id, category
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                wait_snapshot["snapshot_time"],
+                row["session_id"],
+                row["db_name"],
+                row["wait_type"],
+                row["wait_time_ms"],
+                row["blocking_session_id"],
+                row["category"],
+            ),
+        )
+
+    conn.commit()
+    conn.close()
 
 
 def collect_resource_metrics(cursor, monitored_databases):
@@ -435,10 +617,16 @@ def run_health_check_with_score():
 
         resource_snapshot = collect_resource_metrics(cursor, monitored_databases)
         save_resource_metrics(resource_snapshot)
+        wait_snapshot = collect_wait_metrics(cursor)
+        save_wait_metrics(wait_snapshot)
         print(
             f"ℹ️ RESOURCE SNAPSHOT: CPU %{resource_snapshot['cpu_pct']:.1f} | "
             f"RAM %{resource_snapshot['ram_used_pct']:.1f} | "
             f"SQL Mem {resource_snapshot['sql_mem_used_mb']:.0f} MB"
+        )
+        print(
+            f"ℹ️ WAIT SNAPSHOT: {len(wait_snapshot['cumulative_waits'])} wait tipi, "
+            f"{len(wait_snapshot['active_waits'])} aktif bekleme"
         )
         
         # 1. SQL Agent Durumu

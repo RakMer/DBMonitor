@@ -485,7 +485,40 @@
         </div>
     </div>
 
-    <!-- ROW 4: GEÇMİŞ TABLOSU -->
+    <!-- ROW 4: WAIT-TIME ANALYSIS -->
+    <div class="row g-4 mb-4">
+        <div class="col-xl-4 col-lg-5">
+            <div class="card card-glass p-4 h-100">
+                <h6 class="text-secondary text-uppercase mb-3">
+                    <i class="bi bi-hourglass-split me-1"></i>Wait Breakdown
+                </h6>
+                <div style="height: 220px;">
+                    <canvas id="waitBreakdownChart"></canvas>
+                </div>
+                <div id="wait-blocking-summary" class="mt-3 small text-secondary">
+                    Bekleme analizi verisi bekleniyor...
+                </div>
+            </div>
+        </div>
+        <div class="col-xl-8 col-lg-7">
+            <div class="card card-glass p-4 h-100">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                    <h6 class="text-secondary text-uppercase mb-0">
+                        <i class="bi bi-graph-up-arrow me-1"></i>Top Wait Types ve Trend
+                    </h6>
+                    <span class="badge bg-secondary text-light" id="wait-last-snapshot">Veri bekleniyor</span>
+                </div>
+                <div style="height: 180px;" class="mb-3">
+                    <canvas id="waitTrendChart"></canvas>
+                </div>
+                <div id="wait-top-list" class="small text-secondary">
+                    Top wait listesi bekleniyor...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ROW 5: GEÇMİŞ TABLOSU -->
     <div class="row g-4 mb-4">
         <div class="col-12">
             <div class="card card-glass p-4">
@@ -1221,6 +1254,8 @@
 
     let resourceTrendChart = null;
     let dbResourceChart = null;
+    let waitBreakdownChart = null;
+    let waitTrendChart = null;
 
     function renderSpikeList(spikes) {
         const el = document.getElementById('resource-spike-list');
@@ -1383,7 +1418,120 @@
         }
     }
 
+    function renderWaitTopList(topWaits) {
+        const el = document.getElementById('wait-top-list');
+        if (!el) return;
+        if (!topWaits || !topWaits.length) {
+            el.innerHTML = '<div class="text-secondary">Top wait verisi yok.</div>';
+            return;
+        }
+
+        el.innerHTML = topWaits.map(w => {
+            return `
+                <div class="d-flex justify-content-between align-items-center py-1 border-bottom border-secondary border-opacity-25">
+                    <span class="text-light">${w.wait_type} <span class="text-secondary">(${w.category})</span></span>
+                    <span>${w.wait_ms} ms | tasks: ${w.tasks}</span>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function renderBlockingSummary(summary) {
+        const el = document.getElementById('wait-blocking-summary');
+        if (!el) return;
+        const top = (summary?.top_blocking_waits || []).map(w => `${w.wait_type} (${w.count})`).join(', ');
+        el.innerHTML = `
+            <div class="d-flex justify-content-between py-1">
+                <span>Blocked Session</span>
+                <span class="text-light fw-semibold">${summary?.blocked_sessions || 0}</span>
+            </div>
+            <div class="d-flex justify-content-between py-1">
+                <span>Blocking Session</span>
+                <span class="text-light fw-semibold">${summary?.blocking_sessions || 0}</span>
+            </div>
+            <div class="pt-2 border-top border-secondary border-opacity-25">
+                <span class="text-secondary">Top Blocking Wait:</span>
+                <div class="text-light">${top || 'Yok'}</div>
+            </div>
+        `;
+    }
+
+    async function loadWaitAnalysis() {
+        try {
+            const res = await fetch('/api/wait-analysis', { cache: 'no-store' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Wait analizi alinamadi');
+
+            const waitSnapshotEl = document.getElementById('wait-last-snapshot');
+            if (waitSnapshotEl) {
+                waitSnapshotEl.textContent = data.latest_snapshot ? `Son anlik: ${data.latest_snapshot}` : 'Veri yok';
+            }
+
+            const breakdownCanvas = document.getElementById('waitBreakdownChart');
+            const breakdown = data.category_breakdown || [];
+            if (breakdownCanvas) {
+                if (waitBreakdownChart) waitBreakdownChart.destroy();
+                waitBreakdownChart = new Chart(breakdownCanvas.getContext('2d'), {
+                    type: 'doughnut',
+                    data: {
+                        labels: breakdown.map(x => x.category),
+                        datasets: [{
+                            data: breakdown.map(x => x.wait_ms),
+                            backgroundColor: ['#ff4d6d', '#ffc857', '#55b9ff', '#27d07d', '#9ca3b5', '#8a6cff'],
+                            borderWidth: 0,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { position: 'bottom', labels: { color: '#b8bfd1', boxWidth: 12 } },
+                        }
+                    }
+                });
+            }
+
+            const trendCanvas = document.getElementById('waitTrendChart');
+            const waitTrend = data.wait_trend || { labels: [], delta_wait_ms: [] };
+            if (trendCanvas) {
+                if (waitTrendChart) waitTrendChart.destroy();
+                waitTrendChart = new Chart(trendCanvas.getContext('2d'), {
+                    type: 'line',
+                    data: {
+                        labels: waitTrend.labels || [],
+                        datasets: [{
+                            label: 'Toplam Wait Delta (ms)',
+                            data: waitTrend.delta_wait_ms || [],
+                            borderColor: '#ff4d6d',
+                            backgroundColor: 'rgba(255,77,109,0.12)',
+                            borderWidth: 2,
+                            pointRadius: 2,
+                            fill: true,
+                            tension: 0.25
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { labels: { color: '#b8bfd1' } } },
+                        scales: {
+                            x: { ticks: { color: '#8b8fa3', maxTicksLimit: 8 }, grid: { color: 'rgba(255,255,255,0.04)' } },
+                            y: { ticks: { color: '#8b8fa3' }, grid: { color: 'rgba(255,255,255,0.04)' } },
+                        }
+                    }
+                });
+            }
+
+            renderWaitTopList(data.top_waits || []);
+            renderBlockingSummary(data.blocking_summary || {});
+        } catch (err) {
+            const el = document.getElementById('wait-top-list');
+            if (el) el.textContent = err.message || 'Wait analizi alinamadi';
+        }
+    }
+
     loadResourceMetrics();
+    loadWaitAnalysis();
 
     // Table search filter
     const searchInput = document.getElementById('table-search');

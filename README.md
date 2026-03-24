@@ -2,6 +2,8 @@
 
 MSSQL sunucusunun sağlık durumunu otomatik olarak izleyen, skorlayan, modern bir web dashboard'unda gösteren ve Telegram üzerinden çift yönlü yönetim imkânı sunan kurumsal bir veritabanı izleme aracı.
 
+> Yeni: Kapsamli teknik dokuman icin `TOOL_DOKUMAN.md` dosyasina bakin.
+
 ---
 
 ## 📋 İçindekiler

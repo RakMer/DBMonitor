@@ -170,6 +170,34 @@ def ensure_resource_tables(conn):
         )
         """
     )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS WaitSnapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_time TEXT NOT NULL,
+            wait_type TEXT NOT NULL,
+            wait_time_ms_total INTEGER,
+            signal_wait_ms_total INTEGER,
+            waiting_tasks_count_total INTEGER,
+            category TEXT,
+            UNIQUE(snapshot_time, wait_type)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ActiveWaitSnapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_time TEXT NOT NULL,
+            session_id INTEGER,
+            db_name TEXT,
+            wait_type TEXT,
+            wait_time_ms INTEGER,
+            blocking_session_id INTEGER,
+            category TEXT
+        )
+        """
+    )
     conn.commit()
 
 
@@ -608,6 +636,169 @@ def api_resource_metrics():
             "distribution": db_distribution,
             "spikes": spike_summary,
             "latest_snapshot": latest_ts,
+        }
+    )
+
+
+@app.route("/api/wait-analysis", methods=["GET"])
+def api_wait_analysis():
+    guard = enforce_auth()
+    if guard:
+        return guard
+
+    conn = get_db()
+    ensure_resource_tables(conn)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT DISTINCT snapshot_time
+        FROM WaitSnapshots
+        ORDER BY snapshot_time DESC
+        LIMIT 40
+        """
+    )
+    snapshot_rows = cursor.fetchall()
+    snapshot_times_desc = [r["snapshot_time"] for r in snapshot_rows]
+
+    if not snapshot_times_desc:
+        conn.close()
+        return jsonify({
+            "latest_snapshot": None,
+            "top_waits": [],
+            "category_breakdown": [],
+            "wait_trend": {"labels": [], "delta_wait_ms": []},
+            "blocking_summary": {"blocked_sessions": 0, "blocking_sessions": 0, "top_blocking_waits": []},
+        })
+
+    latest_ts = snapshot_times_desc[0]
+    previous_ts = snapshot_times_desc[1] if len(snapshot_times_desc) >= 2 else None
+
+    cursor.execute(
+        """
+        SELECT wait_type, wait_time_ms_total, signal_wait_ms_total, waiting_tasks_count_total, category
+        FROM WaitSnapshots
+        WHERE snapshot_time = ?
+        """,
+        (latest_ts,),
+    )
+    latest_waits = cursor.fetchall()
+
+    previous_map = {}
+    if previous_ts:
+        cursor.execute(
+            """
+            SELECT wait_type, wait_time_ms_total, signal_wait_ms_total, waiting_tasks_count_total
+            FROM WaitSnapshots
+            WHERE snapshot_time = ?
+            """,
+            (previous_ts,),
+        )
+        for row in cursor.fetchall():
+            previous_map[row["wait_type"]] = row
+
+    top_waits = []
+    category_totals = {}
+    for row in latest_waits:
+        wait_type = row["wait_type"]
+        prev = previous_map.get(wait_type)
+        wait_delta = safe_delta(row["wait_time_ms_total"], prev["wait_time_ms_total"] if prev else 0)
+        signal_delta = safe_delta(row["signal_wait_ms_total"], prev["signal_wait_ms_total"] if prev else 0)
+        tasks_delta = safe_delta(row["waiting_tasks_count_total"], prev["waiting_tasks_count_total"] if prev else 0)
+
+        if wait_delta <= 0:
+            continue
+
+        category = row["category"] or "Other"
+        category_totals[category] = category_totals.get(category, 0.0) + wait_delta
+
+        top_waits.append(
+            {
+                "wait_type": wait_type,
+                "category": category,
+                "wait_ms": round(wait_delta, 2),
+                "signal_ms": round(signal_delta, 2),
+                "tasks": int(tasks_delta),
+            }
+        )
+
+    top_waits.sort(key=lambda x: x["wait_ms"], reverse=True)
+    top_waits = top_waits[:12]
+
+    category_breakdown = []
+    total_wait_ms = sum(category_totals.values())
+    for category, value in sorted(category_totals.items(), key=lambda kv: kv[1], reverse=True):
+        ratio = (value / total_wait_ms * 100.0) if total_wait_ms > 0 else 0.0
+        category_breakdown.append(
+            {
+                "category": category,
+                "wait_ms": round(value, 2),
+                "share_pct": round(ratio, 2),
+            }
+        )
+
+    trend_labels = []
+    trend_delta = []
+    snapshot_times = list(reversed(snapshot_times_desc[:20]))
+    total_by_snapshot = {}
+    cursor.execute(
+        """
+        SELECT snapshot_time, SUM(wait_time_ms_total) AS total_wait
+        FROM WaitSnapshots
+        WHERE snapshot_time IN ({})
+        GROUP BY snapshot_time
+        """.format(
+            ",".join(["?"] * len(snapshot_times))
+        ),
+        snapshot_times,
+    )
+    for row in cursor.fetchall():
+        total_by_snapshot[row["snapshot_time"]] = float(row["total_wait"] or 0)
+
+    prev_total = None
+    for ts in snapshot_times:
+        curr_total = total_by_snapshot.get(ts, 0.0)
+        delta = safe_delta(curr_total, prev_total if prev_total is not None else curr_total)
+        trend_labels.append(ts)
+        trend_delta.append(round(delta, 2))
+        prev_total = curr_total
+
+    cursor.execute(
+        """
+        SELECT session_id, db_name, wait_type, wait_time_ms, blocking_session_id, category
+        FROM ActiveWaitSnapshots
+        WHERE snapshot_time = ?
+        """,
+        (latest_ts,),
+    )
+    active_rows = cursor.fetchall()
+    blocked_sessions = [r for r in active_rows if int(r["blocking_session_id"] or 0) > 0]
+    blocking_session_ids = sorted({int(r["blocking_session_id"]) for r in blocked_sessions if int(r["blocking_session_id"]) > 0})
+
+    wait_group = {}
+    for r in blocked_sessions:
+        wt = r["wait_type"] or "UNKNOWN"
+        wait_group[wt] = wait_group.get(wt, 0) + 1
+    top_blocking_waits = [
+        {"wait_type": wt, "count": cnt}
+        for wt, cnt in sorted(wait_group.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    ]
+
+    conn.close()
+    return jsonify(
+        {
+            "latest_snapshot": latest_ts,
+            "top_waits": top_waits,
+            "category_breakdown": category_breakdown,
+            "wait_trend": {
+                "labels": trend_labels,
+                "delta_wait_ms": trend_delta,
+            },
+            "blocking_summary": {
+                "blocked_sessions": len(blocked_sessions),
+                "blocking_sessions": len(blocking_session_ids),
+                "top_blocking_waits": top_blocking_waits,
+            },
         }
     )
 
