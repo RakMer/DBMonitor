@@ -3,14 +3,13 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 import threading
 import pyodbc
 from flask import Flask, Response, jsonify, render_template, request
 from dotenv import dotenv_values, load_dotenv, set_key
 
-current_message_statu = 0
-alert_sent_time = None      # Mesajın atıldığı zamanı tutar
-alert_resend_after = None   # Bir sonraki gönderim için belirlenen zamanı tutar
+
 
 
 app = Flask(__name__)
@@ -25,6 +24,14 @@ ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEST_SCRIPT_PATH = os.path.join(BASE_DIR, "Test.py")
 RUN_TEST_LOCK = threading.Lock()
+RUN_CHECK_STATE_LOCK = threading.Lock()
+RUN_CHECK_STATE = {
+    "status": "idle",
+    "message": "",
+    "error": "",
+    "started_at": None,
+    "finished_at": None,
+}
 
 # Load .env so security credentials can be read from environment
 load_dotenv(ENV_PATH)
@@ -45,6 +52,7 @@ DEFAULT_SETTINGS = {
 DASHBOARD_USER = os.getenv("DASHBOARD_USER")
 DASHBOARD_PASS = os.getenv("DASHBOARD_PASS")
 DB_SERVER = os.getenv("DB_SERVER")
+DB_NAME = os.getenv("DB_NAME", "master")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
@@ -138,12 +146,54 @@ def get_mssql_connection():
     conn_str = (
         f"DRIVER={{{DB_DRIVER}}};"
         f"SERVER={DB_SERVER};"
-        f"DATABASE=master;"
+        f"DATABASE={DB_NAME};"
         f"UID={DB_USER};"
         f"PWD={DB_PASSWORD};"
         f"TrustServerCertificate=yes;"
     )
     return pyodbc.connect(conn_str, timeout=8)
+
+
+def set_run_check_state(status: str, message: str = "", error: str = ""):
+    now_ts = int(time.time())
+    with RUN_CHECK_STATE_LOCK:
+        RUN_CHECK_STATE["status"] = status
+        RUN_CHECK_STATE["message"] = message
+        RUN_CHECK_STATE["error"] = error
+        if status == "running":
+            RUN_CHECK_STATE["started_at"] = now_ts
+            RUN_CHECK_STATE["finished_at"] = None
+        elif status in {"completed", "failed"}:
+            RUN_CHECK_STATE["finished_at"] = now_ts
+
+
+def get_run_check_state():
+    with RUN_CHECK_STATE_LOCK:
+        return dict(RUN_CHECK_STATE)
+
+
+def run_check_worker():
+    try:
+        proc = subprocess.run(
+            [sys.executable, TEST_SCRIPT_PATH],
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if proc.returncode != 0:
+            err_text = (proc.stderr or proc.stdout or "Bilinmeyen hata").strip()
+            set_run_check_state("failed", error=f"Test calismadi: {err_text}")
+            return
+
+        out_text = (proc.stdout or "Kontrol tamamlandi").strip()
+        set_run_check_state("completed", message=out_text[-600:])
+    except subprocess.TimeoutExpired:
+        set_run_check_state("failed", error="Test zaman asimina ugradi (180 sn)")
+    except Exception as e:
+        set_run_check_state("failed", error=f"Beklenmeyen hata: {e}")
+    finally:
+        RUN_TEST_LOCK.release()
 
 
 @app.route("/")
@@ -336,25 +386,21 @@ def api_run_check():
         return jsonify({"error": "Test.py bulunamadi"}), 404
 
     if not RUN_TEST_LOCK.acquire(blocking=False):
-        return jsonify({"error": "Test zaten calisiyor"}), 409
+        state = get_run_check_state()
+        return jsonify({"status": "running", "state": state}), 202
 
-    try:
-        proc = subprocess.run(
-            [sys.executable, TEST_SCRIPT_PATH],
-            cwd=BASE_DIR,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        if proc.returncode != 0:
-            err_text = (proc.stderr or proc.stdout or "Bilinmeyen hata").strip()
-            return jsonify({"error": f"Test calismadi: {err_text}"}), 500
-        out_text = (proc.stdout or "Kontrol tamamlandi").strip()
-        return jsonify({"status": "ok", "message": out_text[-600:]})
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "Test zaman asimina ugradi (180 sn)"}), 504
-    finally:
-        RUN_TEST_LOCK.release()
+    set_run_check_state("running", message="Test calistirildi")
+    thread = threading.Thread(target=run_check_worker, daemon=True)
+    thread.start()
+    return jsonify({"status": "started", "state": get_run_check_state()}), 202
+
+
+@app.route("/api/run-check-status", methods=["GET"])
+def api_run_check_status():
+    guard = enforce_auth()
+    if guard:
+        return guard
+    return jsonify(get_run_check_state())
 
 
 if __name__ == "__main__":

@@ -316,7 +316,7 @@
                     </span>
                     <div>
                         <div class="text-secondary small">Oto Yenileme</div>
-                        <div class="fw-semibold">60 saniye</div>
+                        <div class="fw-semibold">5 dakika</div>
                     </div>
                 </span>
             </div>
@@ -898,6 +898,25 @@
 
     loadMonitoringDatabases();
 
+    async function waitForRunCheckCompletion(maxWaitMs = 240000) {
+        const startedAt = Date.now();
+        while ((Date.now() - startedAt) < maxWaitMs) {
+            const res = await fetch('/api/run-check-status', { cache: 'no-store' });
+            const state = await res.json();
+
+            if (!res.ok) {
+                throw new Error(state.error || 'Kontrol durumu alinamadi');
+            }
+
+            if (state.status === 'completed') return state;
+            if (state.status === 'failed') throw new Error(state.error || 'Test calismadi');
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
+        throw new Error('Test tamamlanmasi beklenirken zaman asimi olustu');
+    }
+
     // Manual refresh
     const refreshBtn = document.getElementById('refresh-btn');
     if (refreshBtn) {
@@ -911,8 +930,15 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
                 });
+
                 const data = await res.json();
-                if (!res.ok) throw new Error(data.error || 'Test calistirilamadi');
+                if (!res.ok) throw new Error(data.error || 'Test baslatilamadi');
+
+                if (!['started', 'running'].includes(data.status)) {
+                    throw new Error('Test baslatma durumu anlasilamadi');
+                }
+
+                await waitForRunCheckCompletion();
                 window.location.reload();
             } catch (err) {
                 alert(err.message || 'Test calistirilamadi');

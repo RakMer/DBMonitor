@@ -50,7 +50,7 @@ DB_DRIVER   = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
 CONN_STR = (
     f"DRIVER={{{DB_DRIVER}}};"
     f"SERVER={DB_SERVER};"
-    f"DATABASE=master;"
+    f"DATABASE={DB_NAME};"
     f"UID={DB_USER};"
     f"PWD={DB_PASSWORD};"
     f"TrustServerCertificate=yes;"
@@ -696,7 +696,28 @@ def cmd_restartdb(message):
 def check(message):
     if not is_authorized(message):
         return
-    Test.run_health_check_with_score()
+    send_typing(message.chat.id)
+    bot.reply_to(
+        message,
+        "⏳ <b>Anlik saglik kontrolu baslatildi.</b>\nSonuc birazdan paylasilacak.",
+        parse_mode="HTML",
+    )
+
+    try:
+        Test.run_health_check_with_score()
+        bot.send_message(
+            message.chat.id,
+            "✅ <b>Saglik kontrolu tamamlandi.</b>\nGuncel skor dashboard ve kayitlara yazildi.",
+            parse_mode="HTML",
+        )
+        logger.info(f"🏥 /check tamamlandi -> chat_id: {message.chat.id}")
+    except Exception as e:
+        bot.send_message(
+            message.chat.id,
+            f"❌ <b>Saglik kontrolu calisirken hata olustu:</b>\n<code>{e}</code>",
+            parse_mode="HTML",
+        )
+        logger.error(f"❌ /check hatasi -> chat_id: {message.chat.id}, hata: {e}")
     
 
 
