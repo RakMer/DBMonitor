@@ -47,7 +47,7 @@ def parse_bool_env(name: str, default: bool) -> bool:
 
 
 CHECK_SYSTEM_DB_BACKUP = parse_bool_env('CHECK_SYSTEM_DB_BACKUP', True)
-CHECK_SYSTEM_DB_AUTOGROWTH = parse_bool_env('CHECK_SYSTEM_DB_AUTOGROWTH', False)
+CHECK_SYSTEM_DB_AUTOGROWTH = parse_bool_env('CHECK_SYSTEM_DB_AUTOGROWTH', True)
 
 
 def sanitize_sql_text(text: str | None, max_len: int = 140) -> str:

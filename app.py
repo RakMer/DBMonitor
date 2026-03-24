@@ -1,6 +1,9 @@
 import hmac
 import os
 import sqlite3
+import subprocess
+import sys
+import threading
 import pyodbc
 from flask import Flask, Response, jsonify, render_template, request
 from dotenv import dotenv_values, load_dotenv, set_key
@@ -19,6 +22,9 @@ app.config.update(
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dbmonitor.sqlite3")
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEST_SCRIPT_PATH = os.path.join(BASE_DIR, "Test.py")
+RUN_TEST_LOCK = threading.Lock()
 
 # Load .env so security credentials can be read from environment
 load_dotenv(ENV_PATH)
@@ -318,6 +324,37 @@ def api_monitoring_databases():
 
     conn.close()
     return jsonify({"databases": payload, "warning": warning})
+
+
+@app.route("/api/run-check", methods=["POST"])
+def api_run_check():
+    guard = enforce_auth()
+    if guard:
+        return guard
+
+    if not os.path.exists(TEST_SCRIPT_PATH):
+        return jsonify({"error": "Test.py bulunamadi"}), 404
+
+    if not RUN_TEST_LOCK.acquire(blocking=False):
+        return jsonify({"error": "Test zaten calisiyor"}), 409
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, TEST_SCRIPT_PATH],
+            cwd=BASE_DIR,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if proc.returncode != 0:
+            err_text = (proc.stderr or proc.stdout or "Bilinmeyen hata").strip()
+            return jsonify({"error": f"Test calismadi: {err_text}"}), 500
+        out_text = (proc.stdout or "Kontrol tamamlandi").strip()
+        return jsonify({"status": "ok", "message": out_text[-600:]})
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Test zaman asimina ugradi (180 sn)"}), 504
+    finally:
+        RUN_TEST_LOCK.release()
 
 
 if __name__ == "__main__":

@@ -636,11 +636,12 @@
 
     <div class="mb-4">
         <h6 class="text-secondary text-uppercase mb-2">Veritabani Izleme Secimi</h6>
-        <p class="small text-secondary mb-2">Secili veritabanlari per-db kontrollerde izlenir; secili olmayanlar ceza hesabina dahil edilmez.</p>
+        <p class="small text-secondary mb-2">Secili veritabanlari per-db kontrollerde izlenir; secili olmayanlar ceza hesabina dahil edilmez.<br><em class="text-muted">(Gri: sistem veritabanlari - denetleme amaçlı)</em></p>
         <div id="db-monitoring-warning" class="small text-warning mb-2"></div>
         <div class="d-flex gap-2 mb-2">
             <button id="db-select-all" class="btn btn-sm btn-outline-light" type="button">Tumunu Sec</button>
             <button id="db-clear-all" class="btn btn-sm btn-outline-light" type="button">Tumunu Kaldir</button>
+            <input id="db-search" type="text" class="form-control form-control-sm bg-dark text-light" placeholder="Veritabani ara..." style="flex: 1; min-width: 120px;">
         </div>
         <div id="db-monitoring-list" class="border border-secondary border-opacity-25 rounded p-2" style="max-height: 260px; overflow-y: auto;"></div>
         <div class="d-flex align-items-center gap-3 mt-3">
@@ -712,7 +713,9 @@
     const saveDbMonitoringBtn = document.getElementById('save-db-monitoring');
     const selectAllDbBtn = document.getElementById('db-select-all');
     const clearAllDbBtn = document.getElementById('db-clear-all');
+    const dbSearchInput = document.getElementById('db-search');
     let monitoringDatabases = [];
+    const SYSTEM_DBS = new Set(['master', 'tempdb', 'model', 'msdb']);
 
     function fillSettingsForm(data) {
         Object.entries(settingsMap).forEach(([key, input]) => {
@@ -792,18 +795,27 @@
 
     function renderMonitoringList() {
         if (!dbMonitoringList) return;
-        if (!monitoringDatabases.length) {
+
+        const query = dbSearchInput?.value.toLowerCase().trim() || '';
+        const toRender = query
+            ? monitoringDatabases.filter(db => db.name.toLowerCase().includes(query))
+            : monitoringDatabases;
+
+        if (!toRender.length) {
             dbMonitoringList.innerHTML = '<div class="text-secondary small">Listelenecek veritabani bulunamadi.</div>';
             return;
         }
 
-        dbMonitoringList.innerHTML = monitoringDatabases.map((item, idx) => {
+        dbMonitoringList.innerHTML = toRender.map((item, idx) => {
             const inputId = `db-monitor-${idx}`;
             const checkedAttr = item.is_monitored ? 'checked' : '';
+            const isSystem = SYSTEM_DBS.has(item.name);
+            const labelClass = isSystem ? 'form-check-label text-muted' : 'form-check-label';
+            const labelStyle = isSystem ? ' style="opacity: 0.65; font-style: italic;"' : '';
             return `
                 <div class="form-check mb-1">
                     <input class="form-check-input db-monitor-item" type="checkbox" value="${item.name}" id="${inputId}" ${checkedAttr}>
-                    <label class="form-check-label" for="${inputId}">${item.name}</label>
+                    <label class="${labelClass}" for="${inputId}"${labelStyle}>${item.name}</label>
                 </div>
             `;
         }).join('');
@@ -880,12 +892,34 @@
         });
     }
 
+    if (dbSearchInput) {
+        dbSearchInput.addEventListener('input', renderMonitoringList);
+    }
+
     loadMonitoringDatabases();
 
     // Manual refresh
     const refreshBtn = document.getElementById('refresh-btn');
     if (refreshBtn) {
-        refreshBtn.addEventListener('click', () => window.location.reload());
+        refreshBtn.addEventListener('click', async () => {
+            const originalHtml = refreshBtn.innerHTML;
+            refreshBtn.disabled = true;
+            refreshBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Calistiriliyor...';
+
+            try {
+                const res = await fetch('/api/run-check', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || 'Test calistirilamadi');
+                window.location.reload();
+            } catch (err) {
+                alert(err.message || 'Test calistirilamadi');
+                refreshBtn.disabled = false;
+                refreshBtn.innerHTML = originalHtml;
+            }
+        });
     }
 
     // Connection state indicator
