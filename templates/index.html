@@ -633,6 +633,23 @@
             <span id="settings-status" class="text-secondary small"></span>
         </div>
     </div>
+
+    <div class="mb-4">
+        <h6 class="text-secondary text-uppercase mb-2">Veritabani Izleme Secimi</h6>
+        <p class="small text-secondary mb-2">Secili veritabanlari per-db kontrollerde izlenir; secili olmayanlar ceza hesabina dahil edilmez.</p>
+        <div id="db-monitoring-warning" class="small text-warning mb-2"></div>
+        <div class="d-flex gap-2 mb-2">
+            <button id="db-select-all" class="btn btn-sm btn-outline-light" type="button">Tumunu Sec</button>
+            <button id="db-clear-all" class="btn btn-sm btn-outline-light" type="button">Tumunu Kaldir</button>
+        </div>
+        <div id="db-monitoring-list" class="border border-secondary border-opacity-25 rounded p-2" style="max-height: 260px; overflow-y: auto;"></div>
+        <div class="d-flex align-items-center gap-3 mt-3">
+            <button id="save-db-monitoring" class="btn btn-sm btn-outline-light" type="button">
+                <i class="bi bi-save me-1"></i>DB Secimini Kaydet
+            </button>
+            <span id="db-monitoring-status" class="text-secondary small"></span>
+        </div>
+    </div>
   </div>
 </div>
 
@@ -689,6 +706,13 @@
     const settingsStatus = document.getElementById('settings-status');
     const saveBtn = document.getElementById('save-settings');
     const resetBtn = document.getElementById('reset-defaults');
+    const dbMonitoringList = document.getElementById('db-monitoring-list');
+    const dbMonitoringWarning = document.getElementById('db-monitoring-warning');
+    const dbMonitoringStatus = document.getElementById('db-monitoring-status');
+    const saveDbMonitoringBtn = document.getElementById('save-db-monitoring');
+    const selectAllDbBtn = document.getElementById('db-select-all');
+    const clearAllDbBtn = document.getElementById('db-clear-all');
+    let monitoringDatabases = [];
 
     function fillSettingsForm(data) {
         Object.entries(settingsMap).forEach(([key, input]) => {
@@ -765,6 +789,98 @@
     }
 
     loadSettingsForm();
+
+    function renderMonitoringList() {
+        if (!dbMonitoringList) return;
+        if (!monitoringDatabases.length) {
+            dbMonitoringList.innerHTML = '<div class="text-secondary small">Listelenecek veritabani bulunamadi.</div>';
+            return;
+        }
+
+        dbMonitoringList.innerHTML = monitoringDatabases.map((item, idx) => {
+            const inputId = `db-monitor-${idx}`;
+            const checkedAttr = item.is_monitored ? 'checked' : '';
+            return `
+                <div class="form-check mb-1">
+                    <input class="form-check-input db-monitor-item" type="checkbox" value="${item.name}" id="${inputId}" ${checkedAttr}>
+                    <label class="form-check-label" for="${inputId}">${item.name}</label>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function getSelectedDatabases() {
+        if (!dbMonitoringList) return [];
+        return Array.from(dbMonitoringList.querySelectorAll('.db-monitor-item:checked')).map(el => el.value);
+    }
+
+    async function loadMonitoringDatabases() {
+        if (!dbMonitoringList) return;
+        try {
+            const res = await fetch('/api/monitoring-databases');
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Veritabani listesi alinamadi');
+            monitoringDatabases = data.databases || [];
+            renderMonitoringList();
+            if (dbMonitoringWarning) dbMonitoringWarning.textContent = data.warning || '';
+        } catch (err) {
+            if (dbMonitoringStatus) dbMonitoringStatus.textContent = err.message;
+        }
+    }
+
+    async function saveMonitoringDatabases() {
+        if (!saveDbMonitoringBtn) return;
+
+        const selected = getSelectedDatabases();
+        const all = monitoringDatabases.map(d => d.name);
+        if (!all.length) {
+            if (dbMonitoringStatus) dbMonitoringStatus.textContent = 'Kaydedilecek veritabani yok';
+            return;
+        }
+
+        saveDbMonitoringBtn.disabled = true;
+        if (dbMonitoringStatus) dbMonitoringStatus.textContent = 'Kaydediliyor...';
+
+        try {
+            const res = await fetch('/api/monitoring-databases', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    all_databases: all,
+                    selected_databases: selected,
+                }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Kayit basarisiz');
+            if (dbMonitoringStatus) dbMonitoringStatus.textContent = 'Kaydedildi';
+            monitoringDatabases = monitoringDatabases.map(d => ({ ...d, is_monitored: selected.includes(d.name) }));
+        } catch (err) {
+            if (dbMonitoringStatus) dbMonitoringStatus.textContent = err.message;
+        } finally {
+            saveDbMonitoringBtn.disabled = false;
+            setTimeout(() => {
+                if (dbMonitoringStatus) dbMonitoringStatus.textContent = '';
+            }, 2500);
+        }
+    }
+
+    if (saveDbMonitoringBtn) {
+        saveDbMonitoringBtn.addEventListener('click', saveMonitoringDatabases);
+    }
+
+    if (selectAllDbBtn) {
+        selectAllDbBtn.addEventListener('click', () => {
+            dbMonitoringList?.querySelectorAll('.db-monitor-item').forEach(el => { el.checked = true; });
+        });
+    }
+
+    if (clearAllDbBtn) {
+        clearAllDbBtn.addEventListener('click', () => {
+            dbMonitoringList?.querySelectorAll('.db-monitor-item').forEach(el => { el.checked = false; });
+        });
+    }
+
+    loadMonitoringDatabases();
 
     // Manual refresh
     const refreshBtn = document.getElementById('refresh-btn');

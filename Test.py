@@ -176,9 +176,38 @@ def init_sqlite_db():
             FOREIGN KEY(history_id) REFERENCES HealthHistory(id)
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS MonitoringConfig (
+            db_name TEXT PRIMARY KEY,
+            is_monitored INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT
+        )
+    ''')
     
     conn.commit()
     conn.close()
+
+
+def load_monitored_databases():
+    conn = sqlite3.connect('dbmonitor.sqlite3')
+    cursor = conn.cursor()
+    cursor.execute("SELECT db_name, is_monitored FROM MonitoringConfig")
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        return None
+
+    return {str(name).lower() for name, is_monitored in rows if int(is_monitored) == 1}
+
+
+def is_database_monitored(db_name, monitored_db_set):
+    if monitored_db_set is None:
+        return True
+    if not db_name:
+        return False
+    return str(db_name).lower() in monitored_db_set
 
 # --- VERİLERİ SQLITE'A KAYDETME FONKSİYONU ---
 def save_to_sqlite(score, penalties):
@@ -203,6 +232,14 @@ def run_health_check_with_score():
     penalties = []
     
     init_sqlite_db()
+    monitored_databases = load_monitored_databases()
+
+    if monitored_databases is None:
+        print("ℹ️ DB filtreleme: Kayitli secim yok, tum veritabanlari izlenecek.")
+    elif not monitored_databases:
+        print("⚠️ DB filtreleme: Hic veritabani secilmemis, per-db kontroller ceza uretmeyecek.")
+    else:
+        print(f"ℹ️ DB filtreleme: {len(monitored_databases)} veritabani secili.")
     
     try:
         conn = pyodbc.connect(conn_str)
@@ -223,10 +260,12 @@ def run_health_check_with_score():
         # 2. Veritabanı Durumları
         cursor.execute("SELECT name, state_desc FROM sys.databases WHERE state_desc != 'ONLINE'")
         offline_dbs = cursor.fetchall()
-        if not offline_dbs:
+        filtered_offline_dbs = [db for db in offline_dbs if is_database_monitored(db[0], monitored_databases)]
+
+        if not filtered_offline_dbs:
             print("🟢 Tüm Veritabanları ONLINE durumda.")
         else:
-            for db in offline_dbs:
+            for db in filtered_offline_dbs:
                 health_score -= 20
                 penalties.append(f"[-20] {db[0]} veritabanı {db[1]} durumunda!")
                 print(f"🔴 Sorunlu Veritabanı: {db[0]} ({db[1]})")
@@ -248,13 +287,14 @@ def run_health_check_with_score():
         """
         cursor.execute(backup_query)
         missing_backups = cursor.fetchall()
+        filtered_missing_backups = [db for db in missing_backups if is_database_monitored(db[0], monitored_databases)]
         
-        if not missing_backups:
+        if not filtered_missing_backups:
             print("🟢 Tüm veritabanlarının güncel yedeği var.")
         else:
             health_score -= 50
             penalties.append("[-50] Son 24 saatte yedeği alınmayan veritabanları var!")
-            print(f"🔴 Yedeği Olmayan DB Sayısı: {len(missing_backups)}")
+            print(f"🔴 Yedeği Olmayan DB Sayısı: {len(filtered_missing_backups)}")
 
         # 4. Disk Doluluk Oranı
         disk_query = """
@@ -345,6 +385,11 @@ def run_health_check_with_score():
             for q in heavy_queries:
                 q_max_sec = float(q[1] or 0)
                 q_avg_reads = float(q[2] or 0)
+                q_db_name = q[0] or "unknown"
+
+                if not is_database_monitored(q_db_name, monitored_databases):
+                    continue
+
                 if q_max_sec >= LONG_QUERY_SEC or q_avg_reads >= LARGE_QUERY_LOGICAL_READS:
                     matched_queries.append(q)
 
@@ -439,6 +484,9 @@ def run_health_check_with_score():
             is_pct = f[2]
             growth_pages = f[3]
 
+            if not is_database_monitored(db_name, monitored_databases):
+                continue
+
             if (not CHECK_SYSTEM_DB_AUTOGROWTH) and db_name and db_name.lower() in SYSTEM_DATABASES:
                 skipped_system_growth += 1
                 continue
@@ -469,6 +517,10 @@ def run_health_check_with_score():
         for log in log_spaces:
             db_name = log[0]
             used_pct = float(log[2])  # Log Space Used (%) kolonu
+
+            if not is_database_monitored(db_name, monitored_databases):
+                continue
+
             last_used_pct = used_pct
             
             if used_pct >= LOG_USED_CRIT_PCT:

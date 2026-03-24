@@ -1,6 +1,7 @@
 import hmac
 import os
 import sqlite3
+import pyodbc
 from flask import Flask, Response, jsonify, render_template, request
 from dotenv import dotenv_values, load_dotenv, set_key
 
@@ -37,6 +38,10 @@ DEFAULT_SETTINGS = {
 
 DASHBOARD_USER = os.getenv("DASHBOARD_USER")
 DASHBOARD_PASS = os.getenv("DASHBOARD_PASS")
+DB_SERVER = os.getenv("DB_SERVER")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
 
 
 def constant_time_compare(val: str | None, expected: str | None) -> bool:
@@ -105,6 +110,34 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def ensure_monitoring_table(conn):
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS MonitoringConfig (
+            db_name TEXT PRIMARY KEY,
+            is_monitored INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT
+        )
+        """
+    )
+
+
+def get_mssql_connection():
+    if not all([DB_SERVER, DB_USER, DB_PASSWORD]):
+        raise ValueError("MSSQL baglanti bilgileri eksik")
+
+    conn_str = (
+        f"DRIVER={{{DB_DRIVER}}};"
+        f"SERVER={DB_SERVER};"
+        f"DATABASE=master;"
+        f"UID={DB_USER};"
+        f"PWD={DB_PASSWORD};"
+        f"TrustServerCertificate=yes;"
+    )
+    return pyodbc.connect(conn_str, timeout=8)
 
 
 @app.route("/")
@@ -222,6 +255,69 @@ def api_settings():
         return jsonify({"error": "Güncellenecek anahtar yok"}), 400
 
     return jsonify({"status": "ok", "updated": updated})
+
+
+@app.route("/api/monitoring-databases", methods=["GET", "POST"])
+def api_monitoring_databases():
+    guard = enforce_auth()
+    if guard:
+        return guard
+
+    conn = get_db()
+    ensure_monitoring_table(conn)
+    cursor = conn.cursor()
+
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        all_dbs = data.get("all_databases") or []
+        selected_dbs = set(data.get("selected_databases") or [])
+
+        if not all_dbs:
+            conn.close()
+            return jsonify({"error": "Kaydedilecek veritabani listesi bos"}), 400
+
+        for db_name in all_dbs:
+            is_monitored = 1 if db_name in selected_dbs else 0
+            cursor.execute(
+                """
+                INSERT INTO MonitoringConfig (db_name, is_monitored, updated_at)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(db_name) DO UPDATE SET
+                    is_monitored = excluded.is_monitored,
+                    updated_at = excluded.updated_at
+                """,
+                (db_name, is_monitored),
+            )
+
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"})
+
+    cursor.execute("SELECT db_name, is_monitored FROM MonitoringConfig")
+    rows = cursor.fetchall()
+    monitored_map = {row["db_name"]: bool(row["is_monitored"]) for row in rows}
+
+    warning = None
+    database_names = []
+    try:
+        sql_conn = get_mssql_connection()
+        sql_cursor = sql_conn.cursor()
+        sql_cursor.execute("SELECT name FROM sys.databases ORDER BY name")
+        database_names = [r[0] for r in sql_cursor.fetchall()]
+        sql_conn.close()
+    except Exception as e:
+        warning = f"MSSQL listesi alinamadi: {e}"
+        database_names = sorted(monitored_map.keys())
+
+    payload = []
+    for db_name in database_names:
+        payload.append({
+            "name": db_name,
+            "is_monitored": monitored_map.get(db_name, True),
+        })
+
+    conn.close()
+    return jsonify({"databases": payload, "warning": warning})
 
 
 if __name__ == "__main__":
