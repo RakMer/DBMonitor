@@ -236,7 +236,7 @@
             </span>
             <span class="d-none d-md-inline-flex align-items-center gap-1">
                 <i class="bi bi-arrow-repeat"></i>
-                Otomatik yenileme: 60s
+                
             </span>
             <button class="btn btn-sm btn-outline-light" data-bs-toggle="offcanvas" data-bs-target="#settingsPanel" aria-controls="settingsPanel">
                 <i class="bi bi-gear"></i>
@@ -455,7 +455,37 @@
         </div>
     </div>
 
-    <!-- ROW 3: GEÇMİŞ TABLOSU -->
+    <!-- ROW 3: KAYNAK TÜKETİMİ -->
+    <div class="row g-4 mb-4">
+        <div class="col-xl-8 col-lg-7">
+            <div class="card card-glass p-4 h-100">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                    <h6 class="text-secondary text-uppercase mb-0">
+                        <i class="bi bi-cpu me-1"></i>Kaynak Tüketimi Trendi
+                    </h6>
+                    <span class="badge bg-secondary text-light" id="resource-last-snapshot">Veri bekleniyor</span>
+                </div>
+                <div class="chart-container">
+                    <canvas id="resourceTrendChart"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-xl-4 col-lg-5">
+            <div class="card card-glass p-4 h-100">
+                <h6 class="text-secondary text-uppercase mb-3">
+                    <i class="bi bi-pie-chart me-1"></i>DB Bazlı I/O Dağılımı
+                </h6>
+                <div style="height: 220px;">
+                    <canvas id="dbResourceChart"></canvas>
+                </div>
+                <div id="resource-spike-list" class="mt-3 small text-secondary">
+                    Spike analizi bekleniyor...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ROW 4: GEÇMİŞ TABLOSU -->
     <div class="row g-4 mb-4">
         <div class="col-12">
             <div class="card card-glass p-4">
@@ -1188,6 +1218,172 @@
     if (resetZoomBtn) {
         resetZoomBtn.addEventListener('click', () => trendChart.resetZoom());
     }
+
+    let resourceTrendChart = null;
+    let dbResourceChart = null;
+
+    function renderSpikeList(spikes) {
+        const el = document.getElementById('resource-spike-list');
+        if (!el) return;
+        if (!spikes || !spikes.length) {
+            el.innerHTML = '<div class="text-secondary">Kiyaslama icin yeterli veri yok.</div>';
+            return;
+        }
+
+        el.innerHTML = spikes.map(item => {
+            const trendIcon = item.is_spike ? 'bi-arrow-up-right text-danger' : 'bi-arrow-right text-success';
+            const trendText = item.is_spike ? 'Ani artis' : 'Stabil';
+            return `
+                <div class="d-flex justify-content-between align-items-center py-1 border-bottom border-secondary border-opacity-25">
+                    <span class="text-light">${item.metric}</span>
+                    <span>
+                        <i class="bi ${trendIcon} me-1"></i>
+                        ${item.current_avg}${item.unit} (${item.delta_pct > 0 ? '+' : ''}${item.delta_pct}%) - ${trendText}
+                    </span>
+                </div>
+            `;
+        }).join('');
+    }
+
+    async function loadResourceMetrics() {
+        try {
+            const res = await fetch('/api/resource-metrics', { cache: 'no-store' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Kaynak metrikleri alinamadi');
+
+            const trend = data.trend || {};
+            const labels = trend.labels || [];
+            const cpu = trend.cpu_pct || [];
+            const ram = trend.ram_pct || [];
+            const disk = trend.disk_io_mb_s || [];
+            const net = trend.net_kb_s || [];
+
+            const lastSnapshotBadge = document.getElementById('resource-last-snapshot');
+            if (lastSnapshotBadge) {
+                lastSnapshotBadge.textContent = data.latest_snapshot ? `Son anlik: ${data.latest_snapshot}` : 'Veri yok';
+            }
+
+            const trendCanvas = document.getElementById('resourceTrendChart');
+            if (trendCanvas && labels.length) {
+                if (resourceTrendChart) resourceTrendChart.destroy();
+                const tctx = trendCanvas.getContext('2d');
+                resourceTrendChart = new Chart(tctx, {
+                    type: 'line',
+                    data: {
+                        labels,
+                        datasets: [
+                            {
+                                label: 'CPU %',
+                                data: cpu,
+                                borderColor: '#ff4d6d',
+                                backgroundColor: 'rgba(255,77,109,0.10)',
+                                borderWidth: 2,
+                                pointRadius: 2,
+                                tension: 0.25,
+                                yAxisID: 'y'
+                            },
+                            {
+                                label: 'RAM %',
+                                data: ram,
+                                borderColor: '#ffc857',
+                                backgroundColor: 'rgba(255,200,87,0.10)',
+                                borderWidth: 2,
+                                pointRadius: 2,
+                                tension: 0.25,
+                                yAxisID: 'y'
+                            },
+                            {
+                                label: 'Disk I/O MB/s',
+                                data: disk,
+                                borderColor: '#27d07d',
+                                backgroundColor: 'rgba(39,208,125,0.10)',
+                                borderWidth: 2,
+                                pointRadius: 2,
+                                tension: 0.25,
+                                yAxisID: 'y1'
+                            },
+                            {
+                                label: 'Ag KB/s',
+                                data: net,
+                                borderColor: '#55b9ff',
+                                backgroundColor: 'rgba(85,185,255,0.10)',
+                                borderWidth: 2,
+                                pointRadius: 2,
+                                tension: 0.25,
+                                yAxisID: 'y1'
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: { mode: 'index', intersect: false },
+                        plugins: {
+                            legend: { labels: { color: '#b8bfd1' } }
+                        },
+                        scales: {
+                            x: {
+                                ticks: { color: '#8b8fa3', maxTicksLimit: 8 },
+                                grid: { color: 'rgba(255,255,255,0.04)' }
+                            },
+                            y: {
+                                position: 'left',
+                                ticks: { color: '#8b8fa3' },
+                                grid: { color: 'rgba(255,255,255,0.04)' }
+                            },
+                            y1: {
+                                position: 'right',
+                                ticks: { color: '#8b8fa3' },
+                                grid: { drawOnChartArea: false }
+                            }
+                        }
+                    }
+                });
+            }
+
+            const dbCanvas = document.getElementById('dbResourceChart');
+            const distribution = data.distribution || [];
+            if (dbCanvas) {
+                if (dbResourceChart) dbResourceChart.destroy();
+                const dctx = dbCanvas.getContext('2d');
+                dbResourceChart = new Chart(dctx, {
+                    type: 'bar',
+                    data: {
+                        labels: distribution.map(x => x.db_name),
+                        datasets: [{
+                            label: 'I/O MB',
+                            data: distribution.map(x => x.io_mb),
+                            backgroundColor: 'rgba(85,185,255,0.55)',
+                            borderColor: '#55b9ff',
+                            borderWidth: 1,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: {
+                                ticks: { color: '#8b8fa3', maxRotation: 55, minRotation: 20 },
+                                grid: { display: false }
+                            },
+                            y: {
+                                ticks: { color: '#8b8fa3' },
+                                grid: { color: 'rgba(255,255,255,0.04)' }
+                            }
+                        }
+                    }
+                });
+            }
+
+            renderSpikeList(data.spikes || []);
+        } catch (err) {
+            const spikeEl = document.getElementById('resource-spike-list');
+            if (spikeEl) spikeEl.textContent = err.message || 'Kaynak metrikleri alinamadi';
+        }
+    }
+
+    loadResourceMetrics();
 
     // Table search filter
     const searchInput = document.getElementById('table-search');

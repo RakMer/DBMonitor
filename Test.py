@@ -5,6 +5,7 @@ import requests
 import app
 import re
 from datetime import datetime
+import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 
 
@@ -184,6 +185,32 @@ def init_sqlite_db():
             updated_at TEXT
         )
     ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ResourceSnapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_time TEXT NOT NULL,
+            cpu_pct REAL,
+            ram_used_pct REAL,
+            sql_mem_used_mb REAL,
+            disk_read_bytes_total INTEGER,
+            disk_write_bytes_total INTEGER,
+            net_sent_bytes_per_sec REAL,
+            net_recv_bytes_per_sec REAL
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS DatabaseResourceSnapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_time TEXT NOT NULL,
+            db_name TEXT NOT NULL,
+            read_bytes_total INTEGER,
+            write_bytes_total INTEGER,
+            io_stall_ms_total INTEGER,
+            UNIQUE(snapshot_time, db_name)
+        )
+    ''')
     
     conn.commit()
     conn.close()
@@ -208,6 +235,165 @@ def is_database_monitored(db_name, monitored_db_set):
     if not db_name:
         return False
     return str(db_name).lower() in monitored_db_set
+
+
+def collect_resource_metrics(cursor, monitored_databases):
+    snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    cpu_pct = 0.0
+    try:
+        cursor.execute("""
+            SELECT TOP 1 CONVERT(XML, record) AS rec
+            FROM sys.dm_os_ring_buffers
+            WHERE ring_buffer_type = 'RING_BUFFER_SCHEDULER_MONITOR'
+              AND record LIKE '%<SystemHealth>%'
+            ORDER BY [timestamp] DESC
+        """)
+        row = cursor.fetchone()
+        if row and row[0]:
+            root = ET.fromstring(str(row[0]))
+            sql_cpu = root.find('.//SystemHealth/ProcessUtilization')
+            idle_cpu = root.find('.//SystemHealth/SystemIdle')
+            if sql_cpu is not None and idle_cpu is not None:
+                cpu_pct = float(sql_cpu.text or 0)
+            elif idle_cpu is not None:
+                cpu_pct = max(0.0, 100.0 - float(idle_cpu.text or 0))
+    except Exception:
+        cpu_pct = 0.0
+
+    ram_used_pct = 0.0
+    sql_mem_used_mb = 0.0
+    try:
+        cursor.execute("SELECT total_physical_memory_kb, available_physical_memory_kb FROM sys.dm_os_sys_memory")
+        mem_row = cursor.fetchone()
+        if mem_row and mem_row[0]:
+            total_kb = float(mem_row[0] or 0)
+            avail_kb = float(mem_row[1] or 0)
+            if total_kb > 0:
+                ram_used_pct = ((total_kb - avail_kb) / total_kb) * 100.0
+    except Exception:
+        ram_used_pct = 0.0
+
+    try:
+        cursor.execute("SELECT physical_memory_in_use_kb FROM sys.dm_os_process_memory")
+        proc_mem = cursor.fetchone()
+        sql_mem_used_mb = float(proc_mem[0] or 0) / 1024.0 if proc_mem else 0.0
+    except Exception:
+        sql_mem_used_mb = 0.0
+
+    disk_read_total = 0
+    disk_write_total = 0
+    try:
+        cursor.execute("SELECT SUM(num_of_bytes_read), SUM(num_of_bytes_written) FROM sys.dm_io_virtual_file_stats(NULL, NULL)")
+        io_row = cursor.fetchone()
+        disk_read_total = int(io_row[0] or 0) if io_row else 0
+        disk_write_total = int(io_row[1] or 0) if io_row else 0
+    except Exception:
+        disk_read_total = 0
+        disk_write_total = 0
+
+    net_sent_per_sec = 0.0
+    net_recv_per_sec = 0.0
+    try:
+        cursor.execute("""
+            SELECT counter_name, cntr_value
+            FROM sys.dm_os_performance_counters
+            WHERE counter_name IN ('Bytes Sent to Transport/sec', 'Bytes Received from Transport/sec')
+        """)
+        for c_name, c_value in cursor.fetchall():
+            val = float(c_value or 0)
+            if c_name == 'Bytes Sent to Transport/sec':
+                net_sent_per_sec += val
+            elif c_name == 'Bytes Received from Transport/sec':
+                net_recv_per_sec += val
+    except Exception:
+        net_sent_per_sec = 0.0
+        net_recv_per_sec = 0.0
+
+    db_snapshots = []
+    try:
+        cursor.execute("""
+            SELECT
+                DB_NAME(vfs.database_id) AS db_name,
+                SUM(vfs.num_of_bytes_read) AS read_bytes_total,
+                SUM(vfs.num_of_bytes_written) AS write_bytes_total,
+                SUM(vfs.io_stall_read_ms + vfs.io_stall_write_ms) AS io_stall_ms_total
+            FROM sys.dm_io_virtual_file_stats(NULL, NULL) vfs
+            GROUP BY vfs.database_id
+        """)
+        for db_name, read_total, write_total, stall_total in cursor.fetchall():
+            if not is_database_monitored(db_name, monitored_databases):
+                continue
+            db_snapshots.append(
+                {
+                    "db_name": db_name,
+                    "read_bytes_total": int(read_total or 0),
+                    "write_bytes_total": int(write_total or 0),
+                    "io_stall_ms_total": int(stall_total or 0),
+                }
+            )
+    except Exception:
+        db_snapshots = []
+
+    return {
+        "snapshot_time": snapshot_time,
+        "cpu_pct": round(cpu_pct, 2),
+        "ram_used_pct": round(ram_used_pct, 2),
+        "sql_mem_used_mb": round(sql_mem_used_mb, 2),
+        "disk_read_bytes_total": disk_read_total,
+        "disk_write_bytes_total": disk_write_total,
+        "net_sent_bytes_per_sec": round(net_sent_per_sec, 2),
+        "net_recv_bytes_per_sec": round(net_recv_per_sec, 2),
+        "db_snapshots": db_snapshots,
+    }
+
+
+def save_resource_metrics(snapshot):
+    conn = sqlite3.connect('dbmonitor.sqlite3')
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO ResourceSnapshots (
+            snapshot_time, cpu_pct, ram_used_pct, sql_mem_used_mb,
+            disk_read_bytes_total, disk_write_bytes_total,
+            net_sent_bytes_per_sec, net_recv_bytes_per_sec
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            snapshot["snapshot_time"],
+            snapshot["cpu_pct"],
+            snapshot["ram_used_pct"],
+            snapshot["sql_mem_used_mb"],
+            snapshot["disk_read_bytes_total"],
+            snapshot["disk_write_bytes_total"],
+            snapshot["net_sent_bytes_per_sec"],
+            snapshot["net_recv_bytes_per_sec"],
+        ),
+    )
+
+    for db_row in snapshot.get("db_snapshots", []):
+        cursor.execute(
+            """
+            INSERT INTO DatabaseResourceSnapshots (
+                snapshot_time, db_name, read_bytes_total, write_bytes_total, io_stall_ms_total
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_time, db_name) DO UPDATE SET
+                read_bytes_total = excluded.read_bytes_total,
+                write_bytes_total = excluded.write_bytes_total,
+                io_stall_ms_total = excluded.io_stall_ms_total
+            """,
+            (
+                snapshot["snapshot_time"],
+                db_row["db_name"],
+                db_row["read_bytes_total"],
+                db_row["write_bytes_total"],
+                db_row["io_stall_ms_total"],
+            ),
+        )
+
+    conn.commit()
+    conn.close()
 
 # --- VERİLERİ SQLITE'A KAYDETME FONKSİYONU ---
 def save_to_sqlite(score, penalties):
@@ -246,6 +432,14 @@ def run_health_check_with_score():
         conn.autocommit = True 
         cursor = conn.cursor()
         print("🔍 Sistem Analizi Başlıyor...\n" + "="*50)
+
+        resource_snapshot = collect_resource_metrics(cursor, monitored_databases)
+        save_resource_metrics(resource_snapshot)
+        print(
+            f"ℹ️ RESOURCE SNAPSHOT: CPU %{resource_snapshot['cpu_pct']:.1f} | "
+            f"RAM %{resource_snapshot['ram_used_pct']:.1f} | "
+            f"SQL Mem {resource_snapshot['sql_mem_used_mb']:.0f} MB"
+        )
         
         # 1. SQL Agent Durumu
         cursor.execute("SELECT status_desc FROM sys.dm_server_services WHERE servicename LIKE 'SQL Server Agent%'")

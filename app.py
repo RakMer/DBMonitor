@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 import threading
+from datetime import datetime
 import pyodbc
 from flask import Flask, Response, jsonify, render_template, request
 from dotenv import dotenv_values, load_dotenv, set_key
@@ -139,6 +140,64 @@ def ensure_monitoring_table(conn):
     )
 
 
+def ensure_resource_tables(conn):
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ResourceSnapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_time TEXT NOT NULL,
+            cpu_pct REAL,
+            ram_used_pct REAL,
+            sql_mem_used_mb REAL,
+            disk_read_bytes_total INTEGER,
+            disk_write_bytes_total INTEGER,
+            net_sent_bytes_per_sec REAL,
+            net_recv_bytes_per_sec REAL
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS DatabaseResourceSnapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_time TEXT NOT NULL,
+            db_name TEXT NOT NULL,
+            read_bytes_total INTEGER,
+            write_bytes_total INTEGER,
+            io_stall_ms_total INTEGER,
+            UNIQUE(snapshot_time, db_name)
+        )
+        """
+    )
+    conn.commit()
+
+
+def parse_snapshot_time(value: str):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def safe_delta(current_value, previous_value):
+    try:
+        curr = float(current_value or 0)
+        prev = float(previous_value or 0)
+        return max(0.0, curr - prev)
+    except Exception:
+        return 0.0
+
+
+def avg(values):
+    vals = [float(v) for v in values if v is not None]
+    if not vals:
+        return 0.0
+    return sum(vals) / len(vals)
+
+
 def get_mssql_connection():
     if not all([DB_SERVER, DB_USER, DB_PASSWORD]):
         raise ValueError("MSSQL baglanti bilgileri eksik")
@@ -210,6 +269,7 @@ def dashboard():
         return guard
 
     conn = get_db()
+    ensure_resource_tables(conn)
     cursor = conn.cursor()
 
     # --- 1) En güncel skor kaydı ---
@@ -328,6 +388,7 @@ def api_monitoring_databases():
 
     conn = get_db()
     ensure_monitoring_table(conn)
+    ensure_resource_tables(conn)
     cursor = conn.cursor()
 
     if request.method == "POST":
@@ -408,6 +469,147 @@ def api_run_check_status():
     if guard:
         return guard
     return jsonify(get_run_check_state())
+
+
+@app.route("/api/resource-metrics", methods=["GET"])
+def api_resource_metrics():
+    guard = enforce_auth()
+    if guard:
+        return guard
+
+    conn = get_db()
+    ensure_resource_tables(conn)
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT snapshot_time, cpu_pct, ram_used_pct, sql_mem_used_mb,
+               disk_read_bytes_total, disk_write_bytes_total,
+               net_sent_bytes_per_sec, net_recv_bytes_per_sec
+        FROM ResourceSnapshots
+        ORDER BY snapshot_time DESC
+        LIMIT 120
+        """
+    )
+    rows = cursor.fetchall()
+    snapshots = list(reversed(rows))
+
+    trend_labels = []
+    cpu_trend = []
+    ram_trend = []
+    disk_io_trend = []
+    net_trend = []
+
+    prev_row = None
+    prev_dt = None
+    for row in snapshots:
+        row_dt = parse_snapshot_time(row["snapshot_time"])
+        trend_labels.append(row["snapshot_time"])
+        cpu_trend.append(round(float(row["cpu_pct"] or 0), 2))
+        ram_trend.append(round(float(row["ram_used_pct"] or 0), 2))
+
+        net_kb_s = (float(row["net_sent_bytes_per_sec"] or 0) + float(row["net_recv_bytes_per_sec"] or 0)) / 1024.0
+        net_trend.append(round(net_kb_s, 2))
+
+        disk_mb_s = 0.0
+        if prev_row is not None and prev_dt is not None and row_dt is not None:
+            seconds = max(1.0, (row_dt - prev_dt).total_seconds())
+            read_delta = safe_delta(row["disk_read_bytes_total"], prev_row["disk_read_bytes_total"])
+            write_delta = safe_delta(row["disk_write_bytes_total"], prev_row["disk_write_bytes_total"])
+            disk_mb_s = (read_delta + write_delta) / (1024.0 * 1024.0) / seconds
+        disk_io_trend.append(round(disk_mb_s, 3))
+
+        prev_row = row
+        prev_dt = row_dt
+
+    latest_ts = trend_labels[-1] if trend_labels else None
+    previous_ts = trend_labels[-2] if len(trend_labels) >= 2 else None
+
+    db_distribution = []
+    if latest_ts:
+        if previous_ts:
+            cursor.execute(
+                """
+                SELECT cur.db_name,
+                       MAX(0, CAST(cur.read_bytes_total AS INTEGER) - CAST(COALESCE(prev.read_bytes_total, 0) AS INTEGER)) AS read_delta,
+                       MAX(0, CAST(cur.write_bytes_total AS INTEGER) - CAST(COALESCE(prev.write_bytes_total, 0) AS INTEGER)) AS write_delta
+                FROM DatabaseResourceSnapshots cur
+                LEFT JOIN DatabaseResourceSnapshots prev
+                       ON prev.snapshot_time = ? AND prev.db_name = cur.db_name
+                WHERE cur.snapshot_time = ?
+                """,
+                (previous_ts, latest_ts),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT db_name,
+                       CAST(read_bytes_total AS INTEGER) AS read_delta,
+                       CAST(write_bytes_total AS INTEGER) AS write_delta
+                FROM DatabaseResourceSnapshots
+                WHERE snapshot_time = ?
+                """,
+                (latest_ts,),
+            )
+
+        db_rows = cursor.fetchall()
+        total_bytes = sum((int(r["read_delta"] or 0) + int(r["write_delta"] or 0)) for r in db_rows)
+        for r in db_rows:
+            bytes_total = int(r["read_delta"] or 0) + int(r["write_delta"] or 0)
+            if bytes_total <= 0:
+                continue
+            ratio = (bytes_total / total_bytes * 100.0) if total_bytes > 0 else 0.0
+            db_distribution.append(
+                {
+                    "db_name": r["db_name"],
+                    "io_mb": round(bytes_total / (1024.0 * 1024.0), 3),
+                    "share_pct": round(ratio, 2),
+                }
+            )
+        db_distribution.sort(key=lambda x: x["io_mb"], reverse=True)
+        db_distribution = db_distribution[:10]
+
+    spike_summary = []
+    if len(cpu_trend) >= 8:
+        n = max(3, min(10, len(cpu_trend) // 2))
+        metrics = [
+            ("CPU", cpu_trend, "%", 8.0),
+            ("RAM", ram_trend, "%", 5.0),
+            ("Disk I/O", disk_io_trend, "MB/s", 1.0),
+            ("Ag", net_trend, "KB/s", 10.0),
+        ]
+        for name, data, unit, min_abs in metrics:
+            current = avg(data[-n:])
+            previous = avg(data[-(2 * n):-n])
+            delta = current - previous
+            delta_pct = (delta / previous * 100.0) if previous > 0 else (100.0 if current > 0 else 0.0)
+            is_spike = delta > min_abs and delta_pct >= 35.0
+            spike_summary.append(
+                {
+                    "metric": name,
+                    "previous_avg": round(previous, 2),
+                    "current_avg": round(current, 2),
+                    "delta_pct": round(delta_pct, 2),
+                    "unit": unit,
+                    "is_spike": bool(is_spike),
+                }
+            )
+
+    conn.close()
+    return jsonify(
+        {
+            "trend": {
+                "labels": trend_labels,
+                "cpu_pct": cpu_trend,
+                "ram_pct": ram_trend,
+                "disk_io_mb_s": disk_io_trend,
+                "net_kb_s": net_trend,
+            },
+            "distribution": db_distribution,
+            "spikes": spike_summary,
+            "latest_snapshot": latest_ts,
+        }
+    )
 
 
 if __name__ == "__main__":
