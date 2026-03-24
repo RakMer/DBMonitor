@@ -157,6 +157,32 @@ def send_typing(chat_id):
         pass
 
 
+def register_bot_commands():
+    """Telegram istemcilerinde slash komut önerileri için komut listesini yayınlar."""
+    commands = [
+        telebot.types.BotCommand("help", "Komut listesini gösterir"),
+        telebot.types.BotCommand("listdb", "Tum veritabanlarini listeler"),
+        telebot.types.BotCommand("statusdb", "Veritabani durumunu gosterir"),
+        telebot.types.BotCommand("stopdb", "Veritabanini OFFLINE yapar"),
+        telebot.types.BotCommand("startdb", "Veritabanini ONLINE yapar"),
+        telebot.types.BotCommand("restartdb", "Veritabanini yeniden baslatir"),
+        telebot.types.BotCommand("takebackup", "Veritabani yedegi alir"),
+        telebot.types.BotCommand("check", "Anlik saglik kontrolu yapar"),
+    ]
+    try:
+        # Farkli sohbet tiplerinde (ozel/grup) komut onerilerinin gorunmesi icin tum scope'lara yaz.
+        bot.set_my_commands(commands)
+        bot.set_my_commands(commands, scope=telebot.types.BotCommandScopeAllPrivateChats())
+        bot.set_my_commands(commands, scope=telebot.types.BotCommandScopeAllGroupChats())
+        bot.set_my_commands(commands, scope=telebot.types.BotCommandScopeAllChatAdministrators())
+
+        # Mobil istemcilerde komut tusunu zorla gorunur hale getir.
+        bot.set_chat_menu_button(menu_button=telebot.types.MenuButtonCommands())
+        logger.info("✅ Telegram komut onerileri guncellendi")
+    except Exception as e:
+        logger.warning(f"⚠️ Telegram komut onerileri guncellenemedi: {e}")
+
+
 # ============================================================
 # BOT KOMUTLARI
 # ============================================================
@@ -703,6 +729,8 @@ if __name__ == "__main__":
     logger.info(f"👥 Yetkili kullanıcı sayısı: {len(ALLOWED_CHAT_IDS)}")
     logger.info(f"📡 Dinleme başlıyor (polling)...")
     logger.info("=" * 50)
+
+    register_bot_commands()
 
     # Sonsuz döngüde dinleme — bağlantı koparsa otomatik yeniden bağlan
     while True:
