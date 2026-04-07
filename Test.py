@@ -690,8 +690,11 @@ def run_health_check_with_score():
         disks = cursor.fetchall()
         
         for disk in disks:
-            drive_letter = disk[0]
+            drive_letter = disk[0] or "UnknownMount"
             free_pct = disk[1]
+            if free_pct is None:
+                print(f"ℹ️ Disk metrik atlandı: {drive_letter} için free space bilgisi yok.")
+                continue
             used_pct = 100 - free_pct
             
             if used_pct >= DISK_CRIT_PCT:
@@ -895,13 +898,20 @@ def run_health_check_with_score():
         log_spaces = cursor.fetchall()
         
         bad_log_count = 0
+        checked_log_db_count = 0
         last_used_pct = None
         for log in log_spaces:
             db_name = log[0]
-            used_pct = float(log[2])  # Log Space Used (%) kolonu
+            used_pct_raw = log[2]
 
             if not is_database_monitored(db_name, monitored_databases):
                 continue
+
+            if used_pct_raw is None:
+                continue
+
+            used_pct = float(used_pct_raw)  # Log Space Used (%) kolonu
+            checked_log_db_count += 1
 
             last_used_pct = used_pct
             
@@ -913,8 +923,10 @@ def run_health_check_with_score():
 
         if not log_spaces:
             print("🟢 LOG SPACE: Log doluluk sorgusu boş döndü (kontrol edilecek veri yok).")
+        elif checked_log_db_count == 0:
+            print("ℹ️ LOG SPACE: İzleme kapsamındaki veritabanları için log doluluk verisi bulunamadı.")
         elif bad_log_count == 0:
-            print(f"🟢 LOG SPACE: Tüm veritabanlarının log doluluk oranları güvenli seviyede. Son okunan doluluk: %{int(last_used_pct)}")
+            print(f"🟢 LOG SPACE: Tüm veritabanlarının log doluluk oranları güvenli seviyede. Son okunan doluluk: %{last_used_pct:.0f}")
 
         print("=" * 50)
         print(f"🏆 GÜNCEL SUNUCU SAĞLIK SKORU: {health_score} / 100")

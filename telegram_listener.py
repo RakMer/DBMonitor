@@ -533,7 +533,7 @@ def take_backup(message):
         )
         return
 
-    backup_dir = os.getenv("BACKUP_DIR", r"C:\\Backups")
+    backup_dir = os.getenv("BACKUP_DIR", r"/Users/mert/Backups")
     os.makedirs(backup_dir, exist_ok=True)
 
     conn = get_db_connection()
