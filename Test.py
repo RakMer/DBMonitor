@@ -663,7 +663,7 @@ def run_health_check_with_score():
         FROM sys.databases d
         LEFT JOIN msdb.dbo.backupset b 
             ON d.name = b.database_name 
-           AND b.type = 'D' 
+           AND b.type IN ('D', 'I') 
            AND b.backup_finish_date >= DATEADD(HOUR, -{BACKUP_MAX_AGE_HOURS}, GETDATE())
         WHERE d.name NOT IN ({excluded_db_sql}) AND b.backup_finish_date IS NULL
         """

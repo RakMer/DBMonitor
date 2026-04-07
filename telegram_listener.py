@@ -10,7 +10,7 @@ Komutlar:
     /restartdb   [db_adı]  → OFFLINE → bekleme → ONLINE (Restart)
     /statusdb    [db_adı]  → Veritabanının mevcut durumunu gösterir
     /listdb                → Tüm veritabanlarını ve durumlarını listeler
-    /takebackup  [db_adı]  → Veritabanının yedeğini alır
+    /takebackup  [db_adı] [full|diff] → Veritabanının yedeğini alır (Varsayılan: full)
     /check                 → Anlık sağlık kontrolü tetikler ve skoru gönderir
     /help                  → Kullanılabilir komutları gösterir
 
@@ -166,7 +166,7 @@ def register_bot_commands():
         telebot.types.BotCommand("stopdb", "Veritabanini OFFLINE yapar"),
         telebot.types.BotCommand("startdb", "Veritabanini ONLINE yapar"),
         telebot.types.BotCommand("restartdb", "Veritabanini yeniden baslatir"),
-        telebot.types.BotCommand("takebackup", "Veritabani yedegi alir"),
+        telebot.types.BotCommand("takebackup", "Veritabani yedegi alir (full/diff)"),
         telebot.types.BotCommand("check", "Anlik saglik kontrolu yapar"),
     ]
     try:
@@ -217,8 +217,8 @@ def cmd_help(message):
         "🏥 <code>/check</code>\n"
         "    → Anlık sağlık kontrolü çalıştırır ve skoru gönderir\n\n"
         "<b>💾 Yedekleme</b>\n"
-        "💾 <code>/takebackup [db_adı]</code>\n"
-        "    → Veritabanının yedeğini alır (C:\\Backups\\)\n\n"
+        "💾 <code>/takebackup [db_adı] [full|diff]</code>\n"
+        "    → Veritabanının yedeğini alır (Tam veya Diferansiyel)\n\n"
         "<b>ℹ️ Genel</b>\n"
         "❓ <code>/help</code>\n"
         "    → Bu yardım mesajını gösterir\n\n"
@@ -504,11 +504,11 @@ def take_backup(message):
     if not is_authorized(message):
         return
 
-    args = message.text.split(maxsplit=1)
+    args = message.text.split(maxsplit=2)
     if len(args) < 2:
         bot.reply_to(
             message,
-            "⚠️ <b>Kullanım:</b> <code>/takebackup [veritabani_adi]</code>",
+            "⚠️ <b>Kullanım:</b> <code>/takebackup [veritabani_adi] [full|diff]</code>",
             parse_mode="HTML",
         )
         return
@@ -517,6 +517,14 @@ def take_backup(message):
     if not db_name:
         bot.reply_to(message, "⚠️ Geçersiz Veritabanı adı!", parse_mode="HTML")
         return
+        
+    backup_type = "full"
+    if len(args) == 3:
+        backup_type = args[2].lower()
+        if backup_type not in ["full", "diff"]:
+            bot.reply_to(message, "⚠️ Geçersiz yedekleme türü! Lütfen 'full' veya 'diff' yazın.")
+            return
+
     if is_protected(db_name):
         bot.reply_to(
             message,
@@ -537,19 +545,24 @@ def take_backup(message):
         cursor = conn.cursor()
         conn.autocommit = True
         zaman = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_yolu = os.path.join(backup_dir, f"{db_name}_{zaman}.bak")
+        backup_suffix = "full" if backup_type == "full" else "diff"
+        backup_yolu = os.path.join(backup_dir, f"{db_name}_{backup_suffix}_{zaman}.bak")
+
+        tur_etiketi = "Tam (Full)" if backup_type == "full" else "Diferansiyel (Diff)"
 
         bekleme_mesaji = bot.reply_to(
             message,
-            f"⏳ <b>{db_name}</b> yedekleniyor, lütfen bekleyin...",
+            f"⏳ <b>{db_name}</b> yedekleniyor ({tur_etiketi}), lütfen bekleyin...",
             parse_mode="HTML",
         )
 
-        # 3. SQL yedekleme komutunu çalıştır (sıkıştırmalı tam yedek)
-        cursor.execute(
-            f"BACKUP DATABASE [{db_name}] TO DISK = ? WITH COMPRESSION, INIT",
-            (backup_yolu,),
-        )
+        # 3. SQL yedekleme komutunu çalıştır
+        if backup_type == "full":
+            sql_query = f"BACKUP DATABASE [{db_name}] TO DISK = ? WITH COMPRESSION, INIT"
+        else:
+            sql_query = f"BACKUP DATABASE [{db_name}] TO DISK = ? WITH DIFFERENTIAL, COMPRESSION, INIT"
+            
+        cursor.execute(sql_query, (backup_yolu,))
 
         # SQL'in ürettiği ilerleme mesajlarını tüket
         while cursor.nextset():
@@ -563,6 +576,7 @@ def take_backup(message):
                 message_id=bekleme_mesaji.message_id,
                 text=(
                     f"✅ <b>{db_name}</b> başarıyla yedeklendi!\n"
+                    f"🛡️ <b>Tür:</b> {tur_etiketi}\n"
                     f"📂 <b>Yol:</b> <code>{backup_yolu}</code>\n"
                     f"📦 <b>Boyut:</b> {dosya_boyutu_mb:.2f} MB"
                 ),
