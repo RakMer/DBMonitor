@@ -34,6 +34,11 @@ RUN_CHECK_STATE = {
     "finished_at": None,
 }
 
+# Shared alert throttle state used by Test.py
+current_message_statu = 0
+alert_sent_time = None
+alert_resend_after = None
+
 # Load .env so security credentials can be read from environment
 load_dotenv(ENV_PATH)
 

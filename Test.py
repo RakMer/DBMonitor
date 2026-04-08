@@ -4,6 +4,7 @@ import os
 import requests
 import app
 import re
+import html
 from datetime import datetime
 import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
@@ -30,6 +31,8 @@ TELEGRAM_THRESHOLD     = int(os.getenv("TELEGRAM_THRESHOLD") or os.getenv("TELEG
 DISK_WARN_PCT          = float(os.getenv('DISK_WARN_PCT', 80))
 DISK_CRIT_PCT          = float(os.getenv('DISK_CRIT_PCT', 90))
 LOG_USED_CRIT_PCT      = float(os.getenv('LOG_USED_CRIT_PCT', 70))
+INDEX_FRAGMENTATION_PCT = float(os.getenv('INDEX_FRAGMENTATION_PCT', 30))
+INDEX_FRAGMENTATION_MIN_PAGES = int(os.getenv('INDEX_FRAGMENTATION_MIN_PAGES', 1000))
 FAILED_LOGIN_ALERT     = int(os.getenv('FAILED_LOGIN_ALERT', 10))
 FAILED_LOGIN_WINDOW_HOURS = int(os.getenv('FAILED_LOGIN_WINDOW_HOURS', 24))
 BACKUP_MAX_AGE_HOURS   = int(os.getenv('BACKUP_MAX_AGE_HOURS', 24))
@@ -49,6 +52,7 @@ def parse_bool_env(name: str, default: bool) -> bool:
 
 CHECK_SYSTEM_DB_BACKUP = parse_bool_env('CHECK_SYSTEM_DB_BACKUP', True)
 CHECK_SYSTEM_DB_AUTOGROWTH = parse_bool_env('CHECK_SYSTEM_DB_AUTOGROWTH', True)
+CHECK_SYSTEM_DB_INDEX = parse_bool_env('CHECK_SYSTEM_DB_INDEX', False)
 
 
 def sanitize_sql_text(text: str | None, max_len: int = 140) -> str:
@@ -58,12 +62,19 @@ def sanitize_sql_text(text: str | None, max_len: int = 140) -> str:
     return normalized[:max_len] + ("..." if len(normalized) > max_len else "")
 
 
+def truncate_label(value: str, max_len: int = 42) -> str:
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 3] + "..."
+
+
 def build_telegram_penalty_lines(penalties: list[str]) -> str:
     if not penalties:
         return "• Belirtilen ceza yok."
 
     long_query_items = []
     auto_growth_items = []
+    index_fragment_items = []
     other_items = []
 
     for p in penalties:
@@ -71,10 +82,12 @@ def build_telegram_penalty_lines(penalties: list[str]) -> str:
             long_query_items.append(p)
         elif "Auto Growth:" in p:
             auto_growth_items.append(p)
+        elif "is heavily fragmented" in p and "Index [" in p:
+            index_fragment_items.append(p)
         else:
             other_items.append(p)
 
-    lines = [f"• {item}" for item in other_items]
+    lines = [f"• {html.escape(item)}" for item in other_items]
 
     if long_query_items:
         lines.append(f"• [-8] Uzun/Büyük Sorgu: {len(long_query_items)} adet")
@@ -84,10 +97,11 @@ def build_telegram_penalty_lines(penalties: list[str]) -> str:
             reads_match = re.search(r"AvgReads=([0-9]+)", item)
             sql_match = re.search(r"SQL='(.+)'$", item)
 
-            db_name = db_match.group(1) if db_match else "unknown"
+            db_name = html.escape(db_match.group(1) if db_match else "unknown")
             max_sec = max_match.group(1) if max_match else "?"
             avg_reads = reads_match.group(1) if reads_match else "?"
-            sql_short = sanitize_sql_text(sql_match.group(1), 70) if sql_match else "SQL bilgisi yok"
+            sql_short_raw = sanitize_sql_text(sql_match.group(1), 70) if sql_match else "SQL bilgisi yok"
+            sql_short = html.escape(sql_short_raw)
             lines.append(f"  - DB={db_name} | Max={max_sec}s | AvgReads={avg_reads} | SQL='{sql_short}'")
 
         if len(long_query_items) > 2:
@@ -98,14 +112,29 @@ def build_telegram_penalty_lines(penalties: list[str]) -> str:
         for item in auto_growth_items[:2]:
             ag_match = re.search(r"Auto Growth: (.+?) veritabanının '(.+?)' dosyası", item)
             if ag_match:
-                db_name = ag_match.group(1)
-                file_name = ag_match.group(2)
+                db_name = html.escape(ag_match.group(1))
+                file_name = html.escape(ag_match.group(2))
                 lines.append(f"  - {db_name}.{file_name}")
             else:
-                lines.append(f"  - {sanitize_sql_text(item, 90)}")
+                lines.append(f"  - {html.escape(sanitize_sql_text(item, 90))}")
 
         if len(auto_growth_items) > 2:
             lines.append(f"  - +{len(auto_growth_items) - 2} dosya daha")
+
+    if index_fragment_items:
+        lines.append(f"• [-10] Index Fragmentation: {len(index_fragment_items)} adet")
+        for item in index_fragment_items[:2]:
+            match = re.search(r"Index \[(.+?)\] on table \[(.+?)\] is heavily fragmented \(([0-9.]+)%\)", item)
+            if match:
+                index_name = html.escape(truncate_label(match.group(1), 38))
+                table_name = html.escape(truncate_label(match.group(2), 42))
+                frag_pct = match.group(3)
+                lines.append(f"  - {table_name} | {index_name} | %{frag_pct}")
+            else:
+                lines.append(f"  - {html.escape(sanitize_sql_text(item, 90))}")
+
+        if len(index_fragment_items) > 2:
+            lines.append(f"  - +{len(index_fragment_items) - 2} adet daha")
 
     max_lines = 14
     if len(lines) > max_lines:
@@ -140,7 +169,7 @@ def send_telegram_alert(score, penalties):
     message = (
         f"{status_emoji} <b>DB Monitor Alarmı</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🖥️  <b>Sunucu:</b> {server}\n"
+        f"🖥️  <b>Sunucu:</b> {html.escape(server or 'unknown')}\n"
         f"📊 <b>Sağlık Skoru:</b> <b>{score}/100</b> — {status_text}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>Aktif Alarmlar:</b>\n{penalty_lines}"
@@ -530,6 +559,70 @@ def collect_resource_metrics(cursor, monitored_databases):
     }
 
 
+def check_index_fragmentation(cursor, monitored_databases):
+    penalties = []
+
+    try:
+        cursor.execute("SELECT name FROM sys.databases WHERE state_desc = 'ONLINE'")
+        db_rows = cursor.fetchall()
+    except Exception as e:
+        print(f"⚠️ INDEX FRAGMENTATION: Veritabani listesi alinamadi: {e}")
+        return penalties
+
+    for row in db_rows:
+        db_name = str(row[0] or "")
+        if not db_name:
+            continue
+
+        if not is_database_monitored(db_name, monitored_databases):
+            continue
+
+        if (not CHECK_SYSTEM_DB_INDEX) and db_name.lower() in SYSTEM_DATABASES:
+            continue
+
+        safe_db_name = db_name.replace("]", "]]" )
+        frag_query = f"""
+        SELECT
+            N'{safe_db_name}' AS db_name,
+            obj.name AS table_name,
+            idx.name AS index_name,
+            ips.avg_fragmentation_in_percent
+        FROM sys.dm_db_index_physical_stats(DB_ID(N'{safe_db_name}'), NULL, NULL, NULL, 'SAMPLED') ips
+        INNER JOIN [{safe_db_name}].sys.indexes idx
+            ON ips.object_id = idx.object_id
+           AND ips.index_id = idx.index_id
+        INNER JOIN [{safe_db_name}].sys.objects obj
+            ON ips.object_id = obj.object_id
+        WHERE obj.type = 'U'
+          AND obj.is_ms_shipped = 0
+          AND idx.index_id > 0
+          AND ips.avg_fragmentation_in_percent > ?
+          AND ips.page_count > ?
+        ORDER BY ips.avg_fragmentation_in_percent DESC
+        """
+
+        try:
+            cursor.execute(frag_query, (INDEX_FRAGMENTATION_PCT, INDEX_FRAGMENTATION_MIN_PAGES))
+            rows = cursor.fetchall()
+        except Exception as db_err:
+            print(f"⚠️ INDEX FRAGMENTATION: {db_name} taranamadi: {db_err}")
+            continue
+
+        for db_name_value, table_name, index_name, frag_pct in rows:
+            try:
+                frag_value = float(frag_pct or 0)
+                penalties.append(
+                    {
+                        "score": -10,
+                        "desc": f"🚨 Index [{index_name}] on table [{db_name_value}.{table_name}] is heavily fragmented ({frag_value:.1f}%).",
+                    }
+                )
+            except Exception:
+                continue
+
+    return penalties
+
+
 def save_resource_metrics(snapshot):
     conn = sqlite3.connect('dbmonitor.sqlite3')
     cursor = conn.cursor()
@@ -795,6 +888,17 @@ def run_health_check_with_score():
                 print("🟢 QUERY STATS: Uzun süre çalışan veya büyük sorgu bulunamadı.")
         except pyodbc.Error as e:
             print(f"⚠️ QUERY STATS: Sorgu analizi atlandı (yetki/erişim sorunu olabilir): {e}")
+
+        # 6.2 Index Fragmentation Kontrolu
+        index_penalties = check_index_fragmentation(cursor, monitored_databases)
+        if not index_penalties:
+            print("🟢 INDEX FRAGMENTATION: Kritik seviyede parçalanmış index bulunamadı.")
+        else:
+            print(f"🔴 INDEX FRAGMENTATION: {len(index_penalties)} adet yüksek parçalanmış index tespit edildi.")
+            for idx_penalty in index_penalties:
+                score_delta = int(idx_penalty.get("score", -10))
+                health_score += score_delta
+                penalties.append(f"[{score_delta}] {idx_penalty.get('desc', 'Index fragmentation sorunu')}")
 
         # 7. Güvenlik ve Denetim Kontrolü
         sysadmin_query = """
