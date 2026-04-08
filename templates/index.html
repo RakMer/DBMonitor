@@ -662,6 +662,10 @@
                 <input id="set-log-crit" type="number" class="form-control bg-dark text-light" min="0" max="100" step="1">
             </div>
             <div class="col-6">
+                <label class="form-label text-secondary small">Index Fragmentation Eşik (%)</label>
+                <input id="set-index-frag" type="number" class="form-control bg-dark text-light" min="0" max="100" step="0.1">
+            </div>
+            <div class="col-6">
                 <label class="form-label text-secondary small">Failed Login Eşik</label>
                 <input id="set-failed-login" type="number" class="form-control bg-dark text-light" min="0" step="1">
             </div>
@@ -760,6 +764,7 @@
         DISK_WARN_PCT: document.getElementById('set-disk-warn'),
         DISK_CRIT_PCT: document.getElementById('set-disk-crit'),
         LOG_USED_CRIT_PCT: document.getElementById('set-log-crit'),
+        INDEX_FRAGMENTATION_PCT: document.getElementById('set-index-frag'),
         FAILED_LOGIN_ALERT: document.getElementById('set-failed-login'),
         FAILED_LOGIN_WINDOW_HOURS: document.getElementById('set-failed-window'),
         BACKUP_MAX_AGE_HOURS: document.getElementById('set-backup-age'),
