@@ -1,0 +1,12 @@
+***Yapılacaklar***
+---✅ Birinci olarak uygulamanın şu anki halinin kararlılığını test et.
+---✅ Uzun süre çalışan ve büyük sorguları bul. (Tamamlandı)
+---✅ Telegramda didyoumean yap.
+---✅ Arayüzde istisna veritabanı seçilebilecek. Hangilerinin izlenmesinin istenildiği ayarlanabilecek.
+---✅ Arayüz üzerinden kontrol fonksiyonu tekiklenebilsin.
+---   Deneme komutunu güncelle.
+---✅ Genel kaynak tüketim hesaplama.
+---✅ Sorguların wait-time analizini hesapla.
+---✅ Yedekleme işlemini full ve diferansiyel olarak iki seçenekte yap.
+---✅ İndex fragmentation sağlık kontrolün.
+---   Başka veritabanı motorları için de çalışır hale getir.

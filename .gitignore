@@ -3,7 +3,7 @@ DBvenv/
 
 # Hassas bilgiler
 .env
-TooDo.md
+
 # SQLite veritabanı
 dbmonitor.sqlite3
 
@@ -18,4 +18,3 @@ __pycache__/
 # IDE dosyaları
 .vscode/
 .idea/
-git rm --cached .TooDoo.md

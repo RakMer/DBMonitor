@@ -568,30 +568,23 @@ def take_backup(message):
         while cursor.nextset():
             pass
 
-        # Dosya oluştu mu, boyut nedir kontrol et
+        # BACKUP komutu hatasiz tamamlandiysa islemi basarili kabul et.
+        # Bot ve SQL farkli sunucularda calisiyorsa dosya yolu bot tarafinda gorunmeyebilir.
+        size_line = ""
         if os.path.exists(backup_yolu):
             dosya_boyutu_mb = os.path.getsize(backup_yolu) / (1024 * 1024)
-            bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=bekleme_mesaji.message_id,
-                text=(
-                    f"✅ <b>{db_name}</b> başarıyla yedeklendi!\n"
-                    f"🛡️ <b>Tür:</b> {tur_etiketi}\n"
-                    f"📂 <b>Yol:</b> <code>{backup_yolu}</code>\n"
-                    f"📦 <b>Boyut:</b> {dosya_boyutu_mb:.2f} MB"
-                ),
-                parse_mode="HTML",
-            )
-        else:
-            bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=bekleme_mesaji.message_id,
-                text=(
-                    "❌ SQL hata vermedi ancak yedek dosyası bulunamadı. "
-                    "Bot ve SQL aynı sunucuda mı?"
-                ),
-                parse_mode="HTML",
-            )
+            size_line = f"\n📦 <b>Boyut:</b> {dosya_boyutu_mb:.2f} MB"
+
+        bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=bekleme_mesaji.message_id,
+            text=(
+                f"✅ <b>{db_name}</b> başarıyla yedeklendi!\n"
+                f"🛡️ <b>Tür:</b> {tur_etiketi}\n"
+                f"📂 <b>Yol:</b> <code>{backup_yolu}</code>{size_line}"
+            ),
+            parse_mode="HTML",
+        )
 
     except pyodbc.Error as e:
         bot.reply_to(message, f"❌ <b>SQL Hatası:</b>\n<code>{e}</code>", parse_mode="HTML")
