@@ -9,6 +9,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import os
 import re
+import shutil
+import subprocess
 import time
 
 
@@ -26,6 +28,23 @@ POSTGRES_BACKUP_FILE_EXTENSIONS = (
 
 POSTGRES_BACKUP_CONTENT_SCAN_BYTES = 262144
 
+PG_SIZE_UNIT_TO_BYTES = {
+    "": 1,
+    "b": 1,
+    "bytes": 1,
+    "kb": 1024,
+    "mb": 1024 ** 2,
+    "gb": 1024 ** 3,
+    "tb": 1024 ** 4,
+    "8kb": 8192,
+}
+
+PG_AUTH_FAILURE_PATTERNS = (
+    "password authentication failed",
+    "authentication failed",
+    "no pg_hba.conf entry",
+)
+
 
 def _normalize_backup_token(value: str) -> str:
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
@@ -39,6 +58,119 @@ def _backup_content_mentions_database(content: str, db_name: str) -> bool:
         rf"--\s*database\s*:\s*\"?{db_escaped}\"?",
     )
     return any(re.search(pattern, content, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _parse_pg_size_to_bytes(setting_value: str | int | float | None, unit: str | None) -> int | None:
+    if setting_value is None:
+        return None
+
+    try:
+        numeric = float(setting_value)
+    except (TypeError, ValueError):
+        return None
+
+    unit_key = (unit or "").strip().lower()
+    multiplier = PG_SIZE_UNIT_TO_BYTES.get(unit_key)
+    if multiplier is None:
+        return None
+
+    size_bytes = int(numeric * multiplier)
+    return size_bytes if size_bytes > 0 else None
+
+
+def _is_safe_sql_identifier(name: str | None) -> bool:
+    if not name:
+        return False
+    return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(name)) is not None
+
+
+def _quote_pg_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _resolve_postgres_log_dir(data_directory: str | None, log_directory: str | None) -> str | None:
+    data_dir = (data_directory or "").strip()
+    log_dir = (log_directory or "").strip()
+    if not data_dir or not log_dir:
+        return None
+
+    if os.path.isabs(log_dir):
+        return log_dir
+    return os.path.normpath(os.path.join(data_dir, log_dir))
+
+
+def _count_auth_failures_from_logs(log_dir: str, window_hours: int) -> int | None:
+    if not log_dir or not os.path.isdir(log_dir):
+        return None
+
+    cutoff_epoch = time.time() - (max(1, int(window_hours)) * 3600)
+    candidates: list[tuple[str, float]] = []
+
+    try:
+        with os.scandir(log_dir) as entries:
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+                try:
+                    mtime = float(entry.stat().st_mtime)
+                except OSError:
+                    continue
+                if mtime < cutoff_epoch:
+                    continue
+                candidates.append((entry.path, mtime))
+    except OSError:
+        return None
+
+    if not candidates:
+        return 0
+
+    candidates.sort(key=lambda item: item[1], reverse=True)
+    count = 0
+
+    for file_path, _mtime in candidates[:30]:
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as log_file:
+                for line in log_file:
+                    lower_line = line.lower()
+                    if any(pattern in lower_line for pattern in PG_AUTH_FAILURE_PATTERNS):
+                        count += 1
+        except OSError:
+            continue
+
+    return count
+
+
+def _count_auth_failures_from_docker_logs(container_name: str, window_hours: int) -> int | None:
+    if not container_name:
+        return None
+
+    since_value = f"{max(1, int(window_hours))}h"
+    try:
+        result = subprocess.run(
+            ["docker", "logs", "--since", since_value, container_name],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=15,
+            check=False,
+        )
+    except Exception:
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    if not output.strip():
+        return 0
+
+    count = 0
+    for line in output.splitlines():
+        lower_line = line.lower()
+        if any(pattern in lower_line for pattern in PG_AUTH_FAILURE_PATTERNS):
+            count += 1
+    return count
 
 
 def _find_recent_backed_up_databases(
@@ -447,8 +579,11 @@ class PostgresHealthStrategy(HealthCheckStrategy):
     """PostgreSQL implementation using pg_catalog and statistics views.
 
     Notes:
-    - Some MSSQL-specific checks (SQL Agent, auto-growth, SQL Server backup catalog,
-      DBCC log space) do not have direct PostgreSQL equivalents and return None.
+    - Disk usage is collected from PostgreSQL data/tablespace mount points via OS stats.
+    - Log space is approximated from WAL directory size against max_wal_size.
+    - Memory pressure is approximated by low shared buffer cache hit ratio.
+    - Some MSSQL-specific checks (SQL Agent, auto-growth, SQL Server backup catalog)
+      do not have direct PostgreSQL equivalents and return None.
     - Index fragmentation is approximated via dead tuple ratio (table bloat proxy).
     """
 
@@ -540,10 +675,78 @@ class PostgresHealthStrategy(HealthCheckStrategy):
         return candidate_dbs
 
     def get_disk_usage(self, cursor) -> list[dict[str, object]] | None:
-        return None
+        candidate_paths: list[str] = []
+
+        try:
+            cursor.execute("SELECT setting FROM pg_settings WHERE name = 'data_directory'")
+            row = cursor.fetchone()
+            if row and row[0]:
+                candidate_paths.append(str(row[0]))
+        except Exception:
+            pass
+
+        try:
+            cursor.execute("SELECT pg_tablespace_location(oid) FROM pg_tablespace")
+            for row in cursor.fetchall():
+                location = str(row[0] or "").strip()
+                if location:
+                    candidate_paths.append(location)
+        except Exception:
+            pass
+
+        if not candidate_paths:
+            return None
+
+        rows: list[dict[str, object]] = []
+        seen_devices: set[int] = set()
+
+        for path in candidate_paths:
+            try:
+                stat_info = os.stat(path)
+                if stat_info.st_dev in seen_devices:
+                    continue
+                seen_devices.add(stat_info.st_dev)
+
+                usage = shutil.disk_usage(path)
+                if usage.total <= 0:
+                    continue
+
+                free_pct = (float(usage.free) / float(usage.total)) * 100.0
+                rows.append({"drive": path, "free_pct": free_pct})
+            except OSError:
+                continue
+
+        if rows:
+            return rows
+
+        # DB may run on a different host/container so local filesystem lookup can fail.
+        # Return a soft row so monitor output indicates limited visibility instead of unsupported.
+        return [{"drive": candidate_paths[0], "free_pct": None}]
 
     def get_memory_pressure(self, cursor) -> bool | None:
-        return None
+        cursor.execute(
+            """
+            SELECT
+                COALESCE(SUM(blks_hit), 0) AS blks_hit,
+                COALESCE(SUM(blks_read), 0) AS blks_read
+            FROM pg_stat_database
+            WHERE datname NOT IN ('template0', 'template1')
+            """
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        blks_hit = float(row[0] or 0)
+        blks_read = float(row[1] or 0)
+        total_blocks = blks_hit + blks_read
+
+        # Very small sample sizes are noisy; avoid false alarms.
+        if total_blocks < 10000:
+            return False
+
+        cache_hit_ratio = blks_hit / total_blocks
+        return cache_hit_ratio < 0.90
 
     def get_active_blocks(self, cursor) -> list[dict[str, object]]:
         cursor.execute(
@@ -693,13 +896,158 @@ class PostgresHealthStrategy(HealthCheckStrategy):
         return [str(row[0]) for row in cursor.fetchall()]
 
     def get_failed_login_count(self, cursor, window_hours: int) -> int | None:
-        return None
+        try:
+            cursor.execute(
+                """
+                SELECT
+                    current_setting('data_directory') AS data_directory,
+                    current_setting('log_directory', true) AS log_directory
+                """
+            )
+            row = cursor.fetchone()
+        except Exception:
+            return None
+
+        if not row:
+            return None
+
+        data_directory = str(row[0] or "")
+        log_directory = str(row[1] or "")
+        resolved_log_dir = _resolve_postgres_log_dir(data_directory, log_directory)
+        if resolved_log_dir:
+            file_based_count = _count_auth_failures_from_logs(resolved_log_dir, window_hours)
+            if file_based_count is not None:
+                return file_based_count
+
+        docker_container = (os.getenv("POSTGRES_DOCKER_CONTAINER") or "").strip()
+        return _count_auth_failures_from_docker_logs(docker_container, window_hours)
 
     def get_failed_jobs(self, cursor) -> list[str] | None:
-        return None
+        try:
+            cursor.execute(
+                """
+                SELECT n.nspname
+                FROM pg_extension e
+                JOIN pg_namespace n ON n.oid = e.extnamespace
+                WHERE e.extname = 'pg_cron'
+                """
+            )
+            row = cursor.fetchone()
+        except Exception:
+            return None
+
+        if not row or not row[0]:
+            # pg_cron kurulu degilse job kontrolu bu motor icin desteklenmez.
+            return None
+
+        schema_name = str(row[0])
+        if not _is_safe_sql_identifier(schema_name):
+            return None
+
+        schema_quoted = _quote_pg_identifier(schema_name)
+        query = f"""
+        SELECT
+            d.jobid,
+            COALESCE(d.command, j.command, '') AS command_text,
+            COALESCE(d.status, 'unknown') AS run_status
+        FROM {schema_quoted}.job_run_details d
+        LEFT JOIN {schema_quoted}.job j ON j.jobid = d.jobid
+        WHERE COALESCE(d.end_time, d.start_time) >= (clock_timestamp() - INTERVAL '24 hours')
+          AND LOWER(COALESCE(d.status, '')) NOT IN ('succeeded', 'success')
+        ORDER BY COALESCE(d.end_time, d.start_time) DESC
+        LIMIT 100
+        """
+
+        try:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+        except Exception:
+            rows = []
+
+        failed_jobs: list[str] = []
+        for jobid, command_text, run_status in rows:
+            status_text = str(run_status or "unknown")
+            command_short = str(command_text or "").strip().replace("\n", " ")
+            if len(command_short) > 80:
+                command_short = command_short[:77] + "..."
+            failed_jobs.append(f"pg_cron job #{jobid} status={status_text} command='{command_short}'")
+
+        if failed_jobs:
+            return failed_jobs
+
+        # pgAgent fallback (if installed).
+        try:
+            cursor.execute("SELECT to_regclass('pgagent.pga_joblog')")
+            pgagent_joblog = cursor.fetchone()
+            cursor.execute("SELECT to_regclass('pgagent.pga_job')")
+            pgagent_job = cursor.fetchone()
+        except Exception:
+            return None
+
+        has_pgagent = bool(pgagent_joblog and pgagent_joblog[0]) and bool(pgagent_job and pgagent_job[0])
+        if not has_pgagent:
+            return None
+
+        try:
+            cursor.execute(
+                """
+                SELECT
+                    j.jobname,
+                    l.jlgstatus,
+                    l.jlgstart
+                FROM pgagent.pga_joblog l
+                JOIN pgagent.pga_job j ON j.jobid = l.jlgjobid
+                WHERE l.jlgstart >= (clock_timestamp() - INTERVAL '24 hours')
+                  AND COALESCE(l.jlgstatus, '') NOT IN ('s', 'S')
+                ORDER BY l.jlgstart DESC
+                LIMIT 100
+                """
+            )
+            pgagent_rows = cursor.fetchall()
+        except Exception:
+            return None
+
+        if not pgagent_rows:
+            return []
+
+        for jobname, status, started_at in pgagent_rows:
+            failed_jobs.append(f"pgAgent job '{jobname}' status={status} start={started_at}")
+
+        return failed_jobs
 
     def get_auto_growth_files(self, cursor) -> list[dict[str, object]] | None:
         return None
 
     def get_log_space_usage(self, cursor) -> list[dict[str, object]] | None:
-        return None
+        try:
+            cursor.execute("SELECT setting, unit FROM pg_settings WHERE name = 'max_wal_size'")
+            row = cursor.fetchone()
+            if not row:
+                return None
+            max_wal_bytes = _parse_pg_size_to_bytes(row[0], row[1])
+            if max_wal_bytes is None:
+                return None
+        except Exception:
+            return None
+
+        wal_bytes: int | None = None
+        try:
+            cursor.execute("SELECT COALESCE(SUM(size), 0)::BIGINT FROM pg_ls_waldir()")
+            wal_row = cursor.fetchone()
+            if wal_row and wal_row[0] is not None:
+                wal_bytes = int(wal_row[0])
+        except Exception:
+            wal_bytes = None
+
+        if wal_bytes is None:
+            return None
+
+        try:
+            cursor.execute("SELECT current_database()")
+            db_row = cursor.fetchone()
+            db_name = str(db_row[0]) if db_row and db_row[0] else "postgres"
+        except Exception:
+            db_name = "postgres"
+
+        used_pct = (float(wal_bytes) / float(max_wal_bytes)) * 100.0
+        return [{"db_name": db_name, "used_pct": used_pct}]
