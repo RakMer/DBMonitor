@@ -6,9 +6,9 @@ import sys
 import time
 import threading
 from datetime import datetime
-import pyodbc
 from flask import Flask, Response, jsonify, render_template, request
 from dotenv import dotenv_values, load_dotenv, set_key
+from db_adapters import MSSQLAdapter, PostgresAdapter, get_db_adapter
 
 
 
@@ -233,19 +233,33 @@ def avg(values):
     return sum(vals) / len(vals)
 
 
-def get_mssql_connection():
-    if not all([DB_SERVER, DB_USER, DB_PASSWORD]):
-        raise ValueError("MSSQL baglanti bilgileri eksik")
+def get_live_database_names() -> list[str]:
+    adapter = get_db_adapter()
+    conn = adapter.connect()
+    try:
+        cursor = conn.cursor()
 
-    conn_str = (
-        f"DRIVER={{{DB_DRIVER}}};"
-        f"SERVER={DB_SERVER};"
-        f"DATABASE={DB_NAME};"
-        f"UID={DB_USER};"
-        f"PWD={DB_PASSWORD};"
-        f"TrustServerCertificate=yes;"
-    )
-    return pyodbc.connect(conn_str, timeout=8)
+        if isinstance(adapter, MSSQLAdapter):
+            cursor.execute("SELECT name FROM sys.databases WHERE state_desc = 'ONLINE' ORDER BY name")
+        elif isinstance(adapter, PostgresAdapter):
+            cursor.execute(
+                """
+                SELECT datname
+                FROM pg_database
+                WHERE datallowconn = TRUE
+                  AND NOT datistemplate
+                ORDER BY datname
+                """
+            )
+        else:
+            raise ValueError(f"Desteklenmeyen adapter: {type(adapter).__name__}")
+
+        return [str(row[0]) for row in cursor.fetchall() if row and row[0] is not None]
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def set_run_check_state(status: str, message: str = "", error: str = ""):
@@ -449,6 +463,17 @@ def api_monitoring_databases():
                 (db_name, is_monitored),
             )
 
+        placeholders = ", ".join(["?"] * len(all_dbs))
+        cursor.execute(
+            f"""
+            UPDATE MonitoringConfig
+            SET is_monitored = 0,
+                updated_at = datetime('now')
+            WHERE db_name NOT IN ({placeholders})
+            """,
+            tuple(all_dbs),
+        )
+
         conn.commit()
         conn.close()
         return jsonify({"status": "ok"})
@@ -460,13 +485,9 @@ def api_monitoring_databases():
     warning = None
     database_names = []
     try:
-        sql_conn = get_mssql_connection()
-        sql_cursor = sql_conn.cursor()
-        sql_cursor.execute("SELECT name FROM sys.databases ORDER BY name")
-        database_names = [r[0] for r in sql_cursor.fetchall()]
-        sql_conn.close()
+        database_names = get_live_database_names()
     except Exception as e:
-        warning = f"MSSQL listesi alinamadi: {e}"
+        warning = f"Canli veritabani listesi alinamadi: {e}"
         database_names = sorted(monitored_map.keys())
 
     payload = []

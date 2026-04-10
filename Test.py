@@ -760,8 +760,9 @@ def run_health_check_with_score():
                 print("🟢 Tüm veritabanlarının güncel yedeği var.")
             else:
                 health_score -= 50
-                penalties.append("[-50] Son 24 saatte yedeği alınmayan veritabanları var!")
+                penalties.append(f"[-50] Son {BACKUP_MAX_AGE_HOURS} saatte yedeği alınmayan veritabanları var!")
                 print(f"🔴 Yedeği Olmayan DB Sayısı: {len(filtered_missing_backups)}")
+                print(f"ℹ️ BACKUP: Yedeksiz DB'ler: {', '.join(sorted(filtered_missing_backups))}")
 
         # 4. Disk Doluluk Oranı
         try:

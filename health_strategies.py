@@ -7,6 +7,103 @@ The monitoring loop remains responsible for score calculations and penalties.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import os
+import re
+import time
+
+
+POSTGRES_BACKUP_FILE_EXTENSIONS = (
+    ".backup",
+    ".dump",
+    ".sql",
+    ".bak",
+    ".tar",
+    ".gz",
+    ".tgz",
+    ".xz",
+    ".zst",
+)
+
+POSTGRES_BACKUP_CONTENT_SCAN_BYTES = 262144
+
+
+def _normalize_backup_token(value: str) -> str:
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
+def _backup_content_mentions_database(content: str, db_name: str) -> bool:
+    db_escaped = re.escape(str(db_name).strip())
+    patterns = (
+        rf"create\s+database\s+(?:if\s+not\s+exists\s+)?\"?{db_escaped}\"?",
+        rf"\\connect\s+\"?{db_escaped}\"?",
+        rf"--\s*database\s*:\s*\"?{db_escaped}\"?",
+    )
+    return any(re.search(pattern, content, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _find_recent_backed_up_databases(
+    db_names: list[str],
+    backup_dir: str,
+    max_age_hours: int,
+) -> set[str]:
+    if not db_names or not backup_dir or not os.path.isdir(backup_dir):
+        return set()
+
+    cutoff_epoch = time.time() - (max(1, int(max_age_hours)) * 3600)
+    recent_files: list[tuple[str, str]] = []
+
+    try:
+        with os.scandir(backup_dir) as entries:
+            for entry in entries:
+                if not entry.is_file():
+                    continue
+
+                name_lower = entry.name.lower()
+                _base, extension = os.path.splitext(name_lower)
+                if extension and extension not in POSTGRES_BACKUP_FILE_EXTENSIONS:
+                    continue
+
+                try:
+                    if entry.stat().st_mtime < cutoff_epoch:
+                        continue
+                except OSError:
+                    continue
+
+                recent_files.append((name_lower, entry.path))
+    except OSError:
+        return set()
+
+    if not recent_files:
+        return set()
+
+    normalized_file_names = [_normalize_backup_token(name) for name, _path in recent_files]
+    matched: set[str] = set()
+
+    for db_name in db_names:
+        db_token = _normalize_backup_token(db_name)
+        if not db_token:
+            continue
+        if any(db_token in file_token for file_token in normalized_file_names):
+            matched.add(db_name)
+
+    unmatched = [db_name for db_name in db_names if db_name not in matched]
+    if not unmatched:
+        return matched
+
+    for _name_lower, file_path in recent_files:
+        try:
+            with open(file_path, "rb") as backup_file:
+                content = backup_file.read(POSTGRES_BACKUP_CONTENT_SCAN_BYTES).decode("utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        for db_name in unmatched:
+            if db_name in matched:
+                continue
+            if _backup_content_mentions_database(content, db_name):
+                matched.add(db_name)
+
+    return matched
 
 
 class HealthCheckStrategy(ABC):
@@ -369,6 +466,7 @@ class PostgresHealthStrategy(HealthCheckStrategy):
                    CASE WHEN datallowconn THEN 'ONLINE' ELSE 'OFFLINE' END AS state_desc
             FROM pg_database
             WHERE NOT datallowconn
+              AND NOT datistemplate
             """
         )
         return [(str(name), str(state)) for name, state in cursor.fetchall()]
@@ -379,7 +477,67 @@ class PostgresHealthStrategy(HealthCheckStrategy):
         excluded_databases: set[str],
         max_age_hours: int,
     ) -> list[str] | None:
-        return None
+        cursor.execute(
+            """
+            SELECT datname
+            FROM pg_database
+            WHERE datallowconn = TRUE
+              AND NOT datistemplate
+            ORDER BY datname
+            """
+        )
+        db_names = [str(row[0]) for row in cursor.fetchall()]
+
+        excluded_lower = {str(name).lower() for name in excluded_databases}
+        candidate_dbs = [name for name in db_names if name.lower() not in excluded_lower]
+        if not candidate_dbs:
+            return []
+
+        backup_dir = os.getenv("BACKUP_DIR", "").strip()
+        backed_up_from_files = _find_recent_backed_up_databases(candidate_dbs, backup_dir, max_age_hours)
+        if backed_up_from_files:
+            return [name for name in candidate_dbs if name not in backed_up_from_files]
+
+        # PostgreSQL has no built-in per-database backup catalog like MSDB.
+        # We use WAL archive recency as a practical cluster-level backup signal.
+        try:
+            cursor.execute(
+                """
+                SELECT
+                    LOWER(COALESCE(current_setting('archive_mode'), 'off')) AS archive_mode,
+                    (
+                        (last_archived_time IS NOT NULL
+                         AND last_archived_time >= clock_timestamp() - (%s * INTERVAL '1 hour'))
+                        OR
+                        (
+                            last_archived_time IS NULL
+                            AND COALESCE(archived_count, 0) = 0
+                            AND stats_reset IS NOT NULL
+                            AND stats_reset >= clock_timestamp() - (%s * INTERVAL '1 hour')
+                        )
+                    ) AS has_recent_archive_signal
+                FROM pg_stat_archiver
+                """,
+                (max_age_hours, max_age_hours),
+            )
+        except Exception:
+            return None
+
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        archive_mode = str(row[0] or "off")
+        has_recent_archive_signal = bool(row[1])
+
+        if archive_mode not in {"on", "always"}:
+            # Without archive mode or file evidence, a reliable freshness check is unavailable.
+            return None
+
+        if has_recent_archive_signal:
+            return []
+
+        return candidate_dbs
 
     def get_disk_usage(self, cursor) -> list[dict[str, object]] | None:
         return None
