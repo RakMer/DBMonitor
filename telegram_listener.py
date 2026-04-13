@@ -2,7 +2,7 @@
 telegram_listener.py — DB Monitor Çift Yönlü Telegram Bot Dinleyicisi
 
 Bu betik 7/24 arka planda çalışır ve Telegram üzerinden gelen komutlarla
-MSSQL veritabanlarını yönetir (Online/Offline/Restart/Status).
+MSSQL veya PostgreSQL veritabanlarını yönetir (Online/Offline/Restart/Status).
 
 Komutlar:
     /stopdb      [db_adı]  → Veritabanını OFFLINE yapar
@@ -19,17 +19,18 @@ Güvenlik:
     komut çalıştırabilir. Yetkisiz erişim loglanır ve reddedilir.
 
 Gereksinimler:
-    pip install pyTelegramBotAPI pyodbc python-dotenv
+    pip install pyTelegramBotAPI pyodbc psycopg2-binary python-dotenv
 """
 
 import os
 import time
 import logging
-import pyodbc
+import subprocess
 import telebot
 import Test
 from datetime import datetime
 from dotenv import load_dotenv
+from db_adapters import MSSQLAdapter, PostgresAdapter, get_db_adapter
 
 # ============================================================
 # YAPILANDIRMA
@@ -41,23 +42,26 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_IDS_RAW   = os.getenv("TELEGRAM_CHAT_IDS", "")
 ALLOWED_CHAT_IDS = {int(cid.strip()) for cid in CHAT_IDS_RAW.split(",") if cid.strip()}
 
-DB_SERVER   = os.getenv("DB_SERVER")
-DB_NAME     = os.getenv("DB_NAME", "master")
-DB_USER     = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_DRIVER   = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
+try:
+    DB_ADAPTER = get_db_adapter()
+except Exception as e:
+    raise ValueError(f"❌ Veritabanı adapteri başlatılamadı: {e}") from e
 
-CONN_STR = (
-    f"DRIVER={{{DB_DRIVER}}};"
-    f"SERVER={DB_SERVER};"
-    f"DATABASE={DB_NAME};"
-    f"UID={DB_USER};"
-    f"PWD={DB_PASSWORD};"
-    f"TrustServerCertificate=yes;"
-)
+IS_MSSQL = isinstance(DB_ADAPTER, MSSQLAdapter)
+IS_POSTGRES = isinstance(DB_ADAPTER, PostgresAdapter)
+DB_ENGINE = "mssql" if IS_MSSQL else "postgresql"
+
+DB_SERVER = DB_ADAPTER.server
+DB_NAME = DB_ADAPTER.database
+DB_USER = DB_ADAPTER.username
+DB_PASSWORD = DB_ADAPTER.password
+DB_PORT = getattr(DB_ADAPTER, "port", None)
 
 # Dokunulması yasak sistem veritabanları
-PROTECTED_DBS = {"master", "tempdb", "model", "msdb"}
+if IS_MSSQL:
+    PROTECTED_DBS = {"master", "tempdb", "model", "msdb"}
+else:
+    PROTECTED_DBS = {"postgres", "template0", "template1"}
 
 # ============================================================
 # LOGLAMA AYARLARI
@@ -111,15 +115,44 @@ def is_authorized(message) -> bool:
     return False
 
 
-def get_db_connection():
-    """MSSQL bağlantısı oluşturur. Hata durumunda None döner."""
+def get_db_connection(database_override: str | None = None):
+    """Aktif motora gore veritabani baglantisi olusturur. Hata durumunda None doner."""
     try:
-        conn = pyodbc.connect(CONN_STR, timeout=10)
-        conn.autocommit = True
+        if IS_POSTGRES and database_override:
+            adapter = PostgresAdapter(
+                server=DB_ADAPTER.server,
+                database=database_override,
+                username=DB_ADAPTER.username,
+                password=DB_ADAPTER.password,
+                port=DB_ADAPTER.port,
+                connect_timeout=getattr(DB_ADAPTER, "connect_timeout", 10),
+            )
+            conn = adapter.connect()
+        else:
+            conn = DB_ADAPTER.connect()
+
+        try:
+            conn.autocommit = True
+        except Exception:
+            pass
         return conn
-    except pyodbc.Error as e:
-        logger.error(f"❌ MSSQL bağlantı hatası: {e}")
+    except Exception as e:
+        logger.error(f"❌ {DB_ENGINE.upper()} bağlantı hatası: {e}")
         return None
+
+
+def quote_pg_identifier(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def get_postgres_admin_database(target_db: str) -> str:
+    preferred = (os.getenv("POSTGRES_MAINTENANCE_DB") or "postgres").strip() or "postgres"
+    candidates = [preferred, "postgres", "template1"]
+    target_lower = str(target_db or "").lower()
+    for candidate in candidates:
+        if candidate.lower() != target_lower:
+            return candidate
+    return "postgres"
 
 
 def validate_db_name(db_name: str) -> str | None:
@@ -224,6 +257,7 @@ def cmd_help(message):
         "    → Bu yardım mesajını gösterir\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🖥️ Bağlı Sunucu: <code>{DB_SERVER}</code>\n"
+        f"🧠 Motor: <code>{DB_ENGINE}</code>\n"
         f"👤 Yetkili Kullanıcı Sayısı: {len(ALLOWED_CHAT_IDS)}"
     )
     bot.reply_to(message, help_text, parse_mode="HTML")
@@ -237,17 +271,37 @@ def cmd_listdb(message):
         return
 
     send_typing(message.chat.id)
-    conn = get_db_connection()
+    if IS_MSSQL:
+        conn = get_db_connection()
+    else:
+        conn = get_db_connection(get_postgres_admin_database(""))
     if not conn:
-        bot.reply_to(message, "❌ Veritabanı sunucusuna bağlanılamadı!", parse_mode="HTML")
+        bot.reply_to(message, "❌ Veritabanı yönetim bağlantısı kurulamadı!", parse_mode="HTML")
         return
 
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT name, state_desc, CAST(DATABASEPROPERTYEX(name, 'Recovery') AS NVARCHAR(50)) AS RecoveryModel "
-            "FROM sys.databases ORDER BY name"
-        )
+        if IS_MSSQL:
+            cursor.execute(
+                "SELECT name, state_desc, CAST(DATABASEPROPERTYEX(name, 'Recovery') AS NVARCHAR(50)) AS RecoveryModel "
+                "FROM sys.databases ORDER BY name"
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT
+                    datname,
+                    CASE
+                        WHEN NOT datallowconn THEN 'OFFLINE'
+                        WHEN datconnlimit = 0 THEN 'CONNECTION LIMIT 0'
+                        ELSE 'ONLINE'
+                    END AS state_desc,
+                    pg_get_userbyid(datdba) AS owner_name
+                FROM pg_database
+                WHERE NOT datistemplate
+                ORDER BY datname
+                """
+            )
         rows = cursor.fetchall()
         conn.close()
 
@@ -275,7 +329,7 @@ def cmd_listdb(message):
         bot.reply_to(message, text, parse_mode="HTML")
         logger.info(f"📋 /listdb → {len(rows)} veritabanı listelendi")
 
-    except pyodbc.Error as e:
+    except Exception as e:
         bot.reply_to(message, f"❌ SQL Hatası:\n<code>{e}</code>", parse_mode="HTML")
         logger.error(f"❌ /listdb SQL hatası: {e}")
 
@@ -301,20 +355,43 @@ def cmd_statusdb(message):
         return
 
     send_typing(message.chat.id)
-    conn = get_db_connection()
+    if IS_MSSQL:
+        conn = get_db_connection()
+    else:
+        conn = get_db_connection(get_postgres_admin_database(db_name))
     if not conn:
         bot.reply_to(message, "❌ Veritabanı sunucusuna bağlanılamadı!", parse_mode="HTML")
         return
 
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT name, state_desc, create_date, "
-            "CAST(DATABASEPROPERTYEX(name, 'Recovery') AS NVARCHAR(50)), "
-            "CAST(DATABASEPROPERTYEX(name, 'Collation') AS NVARCHAR(100)) "
-            "FROM sys.databases WHERE name = ?",
-            (db_name,),
-        )
+        if IS_MSSQL:
+            cursor.execute(
+                "SELECT name, state_desc, create_date, "
+                "CAST(DATABASEPROPERTYEX(name, 'Recovery') AS NVARCHAR(50)), "
+                "CAST(DATABASEPROPERTYEX(name, 'Collation') AS NVARCHAR(100)) "
+                "FROM sys.databases WHERE name = ?",
+                (db_name,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT
+                    datname,
+                    CASE
+                        WHEN NOT datallowconn THEN 'OFFLINE'
+                        WHEN datconnlimit = 0 THEN 'CONNECTION LIMIT 0'
+                        ELSE 'ONLINE'
+                    END AS state_desc,
+                    pg_get_userbyid(datdba) AS owner_name,
+                    datconnlimit,
+                    datcollate,
+                    pg_encoding_to_char(encoding) AS encoding_name
+                FROM pg_database
+                WHERE datname = %s
+                """,
+                (db_name,),
+            )
         row = cursor.fetchone()
         conn.close()
 
@@ -329,19 +406,31 @@ def cmd_statusdb(message):
         state = row[1]
         icon = {"ONLINE": "🟢", "OFFLINE": "🔴"}.get(state, "🟡")
 
-        text = (
-            f"{icon} <b>Veritabanı Durumu</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📛 <b>Ad:</b> <code>{row[0]}</code>\n"
-            f"📊 <b>Durum:</b> {state}\n"
-            f"📅 <b>Oluşturulma:</b> {row[2]}\n"
-            f"♻️ <b>Recovery:</b> {row[3]}\n"
-            f"🔤 <b>Collation:</b> {row[4]}"
-        )
+        if IS_MSSQL:
+            text = (
+                f"{icon} <b>Veritabanı Durumu</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📛 <b>Ad:</b> <code>{row[0]}</code>\n"
+                f"📊 <b>Durum:</b> {state}\n"
+                f"📅 <b>Oluşturulma:</b> {row[2]}\n"
+                f"♻️ <b>Recovery:</b> {row[3]}\n"
+                f"🔤 <b>Collation:</b> {row[4]}"
+            )
+        else:
+            text = (
+                f"{icon} <b>Veritabanı Durumu</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📛 <b>Ad:</b> <code>{row[0]}</code>\n"
+                f"📊 <b>Durum:</b> {state}\n"
+                f"👤 <b>Sahibi:</b> {row[2]}\n"
+                f"🔢 <b>Conn Limit:</b> {row[3]}\n"
+                f"🔤 <b>Collation:</b> {row[4]}\n"
+                f"🧩 <b>Encoding:</b> {row[5]}"
+            )
         bot.reply_to(message, text, parse_mode="HTML")
         logger.info(f"📊 /statusdb {db_name} → {state}")
 
-    except pyodbc.Error as e:
+    except Exception as e:
         bot.reply_to(message, f"❌ SQL Hatası:\n<code>{e}</code>", parse_mode="HTML")
         logger.error(f"❌ /statusdb {db_name} SQL hatası: {e}")
 
@@ -379,35 +468,78 @@ def cmd_stopdb(message):
     user = message.from_user
     user_info = f"{user.first_name} {user.last_name or ''}"
 
-    conn = get_db_connection()
+    if IS_MSSQL:
+        conn = get_db_connection()
+    else:
+        conn = get_db_connection(get_postgres_admin_database(db_name))
     if not conn:
         bot.reply_to(message, "❌ Veritabanı sunucusuna bağlanılamadı!", parse_mode="HTML")
         return
 
     try:
-        cursor = conn.cursor()
+        if IS_MSSQL:
+            cursor = conn.cursor()
 
-        # Önce mevcut durumu kontrol et
-        cursor.execute("SELECT state_desc FROM sys.databases WHERE name = ?", (db_name,))
-        row = cursor.fetchone()
-        if not row:
-            bot.reply_to(message, f"⚠️ <code>{db_name}</code> bulunamadı!", parse_mode="HTML")
+            # Önce mevcut durumu kontrol et
+            cursor.execute("SELECT state_desc FROM sys.databases WHERE name = ?", (db_name,))
+            row = cursor.fetchone()
+            if not row:
+                bot.reply_to(message, f"⚠️ <code>{db_name}</code> bulunamadı!", parse_mode="HTML")
+                conn.close()
+                return
+
+            if row[0] == "OFFLINE":
+                bot.reply_to(message, f"ℹ️ <code>{db_name}</code> zaten OFFLINE durumda.", parse_mode="HTML")
+                conn.close()
+                return
+
+            bot.reply_to(
+                message,
+                f"⏳ <code>{db_name}</code> kapatılıyor...\nAktif bağlantılar düşürülecek.",
+                parse_mode="HTML",
+            )
+
+            cursor.execute(f"ALTER DATABASE [{db_name}] SET OFFLINE WITH ROLLBACK IMMEDIATE")
             conn.close()
-            return
+        else:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    datallowconn,
+                    CASE
+                        WHEN NOT datallowconn THEN 'OFFLINE'
+                        WHEN datconnlimit = 0 THEN 'CONNECTION LIMIT 0'
+                        ELSE 'ONLINE'
+                    END AS state_desc
+                FROM pg_database
+                WHERE datname = %s
+                """,
+                (db_name,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                bot.reply_to(message, f"⚠️ <code>{db_name}</code> bulunamadı!", parse_mode="HTML")
+                conn.close()
+                return
 
-        if row[0] == "OFFLINE":
-            bot.reply_to(message, f"ℹ️ <code>{db_name}</code> zaten OFFLINE durumda.", parse_mode="HTML")
+            if not bool(row[0]):
+                bot.reply_to(message, f"ℹ️ <code>{db_name}</code> zaten OFFLINE durumda.", parse_mode="HTML")
+                conn.close()
+                return
+
+            bot.reply_to(
+                message,
+                f"⏳ <code>{db_name}</code> kapatılıyor...\nAktif bağlantılar düşürülecek.",
+                parse_mode="HTML",
+            )
+
+            cursor.execute(f"ALTER DATABASE {quote_pg_identifier(db_name)} WITH ALLOW_CONNECTIONS = false")
+            cursor.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid()",
+                (db_name,),
+            )
             conn.close()
-            return
-
-        bot.reply_to(
-            message,
-            f"⏳ <code>{db_name}</code> kapatılıyor...\nAktif bağlantılar düşürülecek.",
-            parse_mode="HTML",
-        )
-
-        cursor.execute(f"ALTER DATABASE [{db_name}] SET OFFLINE WITH ROLLBACK IMMEDIATE")
-        conn.close()
 
         bot.send_message(
             message.chat.id,
@@ -421,7 +553,7 @@ def cmd_stopdb(message):
         )
         logger.info(f"🔴 /stopdb {db_name} → OFFLINE (by {user_info})")
 
-    except pyodbc.Error as e:
+    except Exception as e:
         bot.reply_to(message, f"❌ <b>SQL Hatası:</b>\n<code>{e}</code>", parse_mode="HTML")
         logger.error(f"❌ /stopdb {db_name} SQL hatası: {e}")
 
@@ -458,30 +590,51 @@ def cmd_startdb(message):
     user = message.from_user
     user_info = f"{user.first_name} {user.last_name or ''}"
 
-    conn = get_db_connection()
+    if IS_MSSQL:
+        conn = get_db_connection()
+    else:
+        conn = get_db_connection(get_postgres_admin_database(db_name))
     if not conn:
-        bot.reply_to(message, "❌ Veritabanı sunucusuna bağlanılamadı!", parse_mode="HTML")
+        bot.reply_to(message, "❌ Veritabanı yönetim bağlantısı kurulamadı!", parse_mode="HTML")
         return
 
     try:
-        cursor = conn.cursor()
+        if IS_MSSQL:
+            cursor = conn.cursor()
 
-        cursor.execute("SELECT state_desc FROM sys.databases WHERE name = ?", (db_name,))
-        row = cursor.fetchone()
-        if not row:
-            bot.reply_to(message, f"⚠️ <code>{db_name}</code> bulunamadı!", parse_mode="HTML")
+            cursor.execute("SELECT state_desc FROM sys.databases WHERE name = ?", (db_name,))
+            row = cursor.fetchone()
+            if not row:
+                bot.reply_to(message, f"⚠️ <code>{db_name}</code> bulunamadı!", parse_mode="HTML")
+                conn.close()
+                return
+
+            if row[0] == "ONLINE":
+                bot.reply_to(message, f"ℹ️ <code>{db_name}</code> zaten ONLINE durumda.", parse_mode="HTML")
+                conn.close()
+                return
+
+            bot.reply_to(message, f"⏳ <code>{db_name}</code> başlatılıyor...", parse_mode="HTML")
+
+            cursor.execute(f"ALTER DATABASE [{db_name}] SET ONLINE")
             conn.close()
-            return
+        else:
+            cursor = conn.cursor()
+            cursor.execute("SELECT datallowconn FROM pg_database WHERE datname = %s", (db_name,))
+            row = cursor.fetchone()
+            if not row:
+                bot.reply_to(message, f"⚠️ <code>{db_name}</code> bulunamadı!", parse_mode="HTML")
+                conn.close()
+                return
 
-        if row[0] == "ONLINE":
-            bot.reply_to(message, f"ℹ️ <code>{db_name}</code> zaten ONLINE durumda.", parse_mode="HTML")
+            if bool(row[0]):
+                bot.reply_to(message, f"ℹ️ <code>{db_name}</code> zaten ONLINE durumda.", parse_mode="HTML")
+                conn.close()
+                return
+
+            bot.reply_to(message, f"⏳ <code>{db_name}</code> başlatılıyor...", parse_mode="HTML")
+            cursor.execute(f"ALTER DATABASE {quote_pg_identifier(db_name)} WITH ALLOW_CONNECTIONS = true")
             conn.close()
-            return
-
-        bot.reply_to(message, f"⏳ <code>{db_name}</code> başlatılıyor...", parse_mode="HTML")
-
-        cursor.execute(f"ALTER DATABASE [{db_name}] SET ONLINE")
-        conn.close()
 
         bot.send_message(
             message.chat.id,
@@ -495,7 +648,7 @@ def cmd_startdb(message):
         )
         logger.info(f"🟢 /startdb {db_name} → ONLINE (by {user_info})")
 
-    except pyodbc.Error as e:
+    except Exception as e:
         bot.reply_to(message, f"❌ <b>SQL Hatası:</b>\n<code>{e}</code>", parse_mode="HTML")
         logger.error(f"❌ /startdb {db_name} SQL hatası: {e}")
 
@@ -525,6 +678,14 @@ def take_backup(message):
             bot.reply_to(message, "⚠️ Geçersiz yedekleme türü! Lütfen 'full' veya 'diff' yazın.")
             return
 
+    if IS_POSTGRES and backup_type != "full":
+        bot.reply_to(
+            message,
+            "⚠️ PostgreSQL için yalnızca full yedek desteklenir.\nKullanım: <code>/takebackup [db_adı] full</code>",
+            parse_mode="HTML",
+        )
+        return
+
     if is_protected(db_name):
         bot.reply_to(
             message,
@@ -536,17 +697,18 @@ def take_backup(message):
     backup_dir = os.getenv("BACKUP_DIR", r"/Users/mert/Backups")
     os.makedirs(backup_dir, exist_ok=True)
 
-    conn = get_db_connection()
-    if not conn:
-        bot.reply_to(message, "❌ Veritabanı sunucusuna bağlanılamadı!", parse_mode="HTML")
-        return
+    conn = None
+    if IS_MSSQL:
+        conn = get_db_connection()
+        if not conn:
+            bot.reply_to(message, "❌ Veritabanı sunucusuna bağlanılamadı!", parse_mode="HTML")
+            return
 
     try:
-        cursor = conn.cursor()
-        conn.autocommit = True
         zaman = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_suffix = "full" if backup_type == "full" else "diff"
-        backup_yolu = os.path.join(backup_dir, f"{db_name}_{backup_suffix}_{zaman}.bak")
+        backup_ext = ".bak" if IS_MSSQL else ".backup"
+        backup_yolu = os.path.join(backup_dir, f"{db_name}_{backup_suffix}_{zaman}{backup_ext}")
 
         tur_etiketi = "Tam (Full)" if backup_type == "full" else "Diferansiyel (Diff)"
 
@@ -556,17 +718,51 @@ def take_backup(message):
             parse_mode="HTML",
         )
 
-        # 3. SQL yedekleme komutunu çalıştır
-        if backup_type == "full":
-            sql_query = f"BACKUP DATABASE [{db_name}] TO DISK = ? WITH COMPRESSION, INIT"
-        else:
-            sql_query = f"BACKUP DATABASE [{db_name}] TO DISK = ? WITH DIFFERENTIAL, COMPRESSION, INIT"
-            
-        cursor.execute(sql_query, (backup_yolu,))
+        if IS_MSSQL:
+            cursor = conn.cursor()
+            conn.autocommit = True
 
-        # SQL'in ürettiği ilerleme mesajlarını tüket
-        while cursor.nextset():
-            pass
+            # 3. SQL yedekleme komutunu çalıştır
+            if backup_type == "full":
+                sql_query = f"BACKUP DATABASE [{db_name}] TO DISK = ? WITH COMPRESSION, INIT"
+            else:
+                sql_query = f"BACKUP DATABASE [{db_name}] TO DISK = ? WITH DIFFERENTIAL, COMPRESSION, INIT"
+
+            cursor.execute(sql_query, (backup_yolu,))
+
+            # SQL'in ürettiği ilerleme mesajlarını tüket
+            while cursor.nextset():
+                pass
+
+        else:
+            conn.close()
+            pg_dump_bin = (os.getenv("PG_DUMP_BIN") or "pg_dump").strip() or "pg_dump"
+            pg_port = str(DB_PORT or "5432")
+            cmd = [
+                pg_dump_bin,
+                "-h", str(DB_SERVER),
+                "-p", pg_port,
+                "-U", str(DB_USER),
+                "-d", str(db_name),
+                "-F", "c",
+                "-f", backup_yolu,
+            ]
+
+            env = os.environ.copy()
+            env["PGPASSWORD"] = str(DB_PASSWORD or "")
+            result = subprocess.run(
+                cmd,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=max(30, int(os.getenv("PG_BACKUP_TIMEOUT_SEC", "600"))),
+                check=False,
+            )
+            if result.returncode != 0:
+                err_text = (result.stderr or result.stdout or "Bilinmeyen hata").strip()
+                raise RuntimeError(err_text[:500])
 
         # BACKUP komutu hatasiz tamamlandiysa islemi basarili kabul et.
         # Bot ve SQL farkli sunucularda calisiyorsa dosya yolu bot tarafinda gorunmeyebilir.
@@ -586,8 +782,8 @@ def take_backup(message):
             parse_mode="HTML",
         )
 
-    except pyodbc.Error as e:
-        bot.reply_to(message, f"❌ <b>SQL Hatası:</b>\n<code>{e}</code>", parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"❌ <b>Yedekleme Hatası:</b>\n<code>{e}</code>", parse_mode="HTML")
     finally:
         try:
             conn.close()
@@ -626,47 +822,87 @@ def cmd_restartdb(message):
     user = message.from_user
     user_info = f"{user.first_name} {user.last_name or ''}"
 
-    conn = get_db_connection()
+    if IS_MSSQL:
+        conn = get_db_connection()
+    else:
+        conn = get_db_connection(get_postgres_admin_database(db_name))
     if not conn:
-        bot.reply_to(message, "❌ Veritabanı sunucusuna bağlanılamadı!", parse_mode="HTML")
+        bot.reply_to(message, "❌ Veritabanı yönetim bağlantısı kurulamadı!", parse_mode="HTML")
         return
 
     try:
-        cursor = conn.cursor()
+        if IS_MSSQL:
+            cursor = conn.cursor()
 
-        cursor.execute("SELECT state_desc FROM sys.databases WHERE name = ?", (db_name,))
-        row = cursor.fetchone()
-        if not row:
-            bot.reply_to(message, f"⚠️ <code>{db_name}</code> bulunamadı!", parse_mode="HTML")
+            cursor.execute("SELECT state_desc FROM sys.databases WHERE name = ?", (db_name,))
+            row = cursor.fetchone()
+            if not row:
+                bot.reply_to(message, f"⚠️ <code>{db_name}</code> bulunamadı!", parse_mode="HTML")
+                conn.close()
+                return
+
+            # Adım 1: OFFLINE
+            bot.reply_to(
+                message,
+                f"🔄 <b>Restart başlatıldı:</b> <code>{db_name}</code>\n\n"
+                f"🔴 <b>Adım 1/3:</b> Kapatılıyor...",
+                parse_mode="HTML",
+            )
+            cursor.execute(f"ALTER DATABASE [{db_name}] SET OFFLINE WITH ROLLBACK IMMEDIATE")
+            logger.info(f"🔄 /restartdb {db_name} → Adım 1: OFFLINE")
+
+            # Adım 2: Bekleme
+            bot.send_message(
+                message.chat.id,
+                f"⏳ <b>Adım 2/3:</b> 3 saniye bekleniyor...",
+                parse_mode="HTML",
+            )
+            time.sleep(3)
+
+            # Adım 3: ONLINE
+            bot.send_message(
+                message.chat.id,
+                f"🟢 <b>Adım 3/3:</b> Başlatılıyor...",
+                parse_mode="HTML",
+            )
+            cursor.execute(f"ALTER DATABASE [{db_name}] SET ONLINE")
             conn.close()
-            return
+        else:
+            cursor = conn.cursor()
+            cursor.execute("SELECT datname FROM pg_database WHERE datname = %s", (db_name,))
+            row = cursor.fetchone()
+            if not row:
+                bot.reply_to(message, f"⚠️ <code>{db_name}</code> bulunamadı!", parse_mode="HTML")
+                conn.close()
+                return
 
-        # Adım 1: OFFLINE
-        bot.reply_to(
-            message,
-            f"🔄 <b>Restart başlatıldı:</b> <code>{db_name}</code>\n\n"
-            f"🔴 <b>Adım 1/3:</b> Kapatılıyor...",
-            parse_mode="HTML",
-        )
-        cursor.execute(f"ALTER DATABASE [{db_name}] SET OFFLINE WITH ROLLBACK IMMEDIATE")
-        logger.info(f"🔄 /restartdb {db_name} → Adım 1: OFFLINE")
+            bot.reply_to(
+                message,
+                f"🔄 <b>Restart başlatıldı:</b> <code>{db_name}</code>\n\n"
+                f"🔴 <b>Adım 1/3:</b> Bağlantılar kapatılıyor...",
+                parse_mode="HTML",
+            )
+            cursor.execute(f"ALTER DATABASE {quote_pg_identifier(db_name)} WITH ALLOW_CONNECTIONS = false")
+            cursor.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid()",
+                (db_name,),
+            )
+            logger.info(f"🔄 /restartdb {db_name} → Adım 1: ALLOW_CONNECTIONS=FALSE")
 
-        # Adım 2: Bekleme
-        bot.send_message(
-            message.chat.id,
-            f"⏳ <b>Adım 2/3:</b> 3 saniye bekleniyor...",
-            parse_mode="HTML",
-        )
-        time.sleep(3)
+            bot.send_message(
+                message.chat.id,
+                f"⏳ <b>Adım 2/3:</b> 3 saniye bekleniyor...",
+                parse_mode="HTML",
+            )
+            time.sleep(3)
 
-        # Adım 3: ONLINE
-        bot.send_message(
-            message.chat.id,
-            f"🟢 <b>Adım 3/3:</b> Başlatılıyor...",
-            parse_mode="HTML",
-        )
-        cursor.execute(f"ALTER DATABASE [{db_name}] SET ONLINE")
-        conn.close()
+            bot.send_message(
+                message.chat.id,
+                f"🟢 <b>Adım 3/3:</b> Bağlantılar açılıyor...",
+                parse_mode="HTML",
+            )
+            cursor.execute(f"ALTER DATABASE {quote_pg_identifier(db_name)} WITH ALLOW_CONNECTIONS = true")
+            conn.close()
 
         bot.send_message(
             message.chat.id,
@@ -680,15 +916,18 @@ def cmd_restartdb(message):
         )
         logger.info(f"✅ /restartdb {db_name} → ONLINE (restart tamamlandı, by {user_info})")
 
-    except pyodbc.Error as e:
+    except Exception as e:
         bot.reply_to(message, f"❌ <b>Restart sırasında SQL hatası:</b>\n<code>{e}</code>", parse_mode="HTML")
         logger.error(f"❌ /restartdb {db_name} SQL hatası: {e}")
 
         # Güvenlik: Hata olursa DB'yi ONLINE yapmaya çalış
         try:
-            conn2 = get_db_connection()
+            conn2 = get_db_connection(get_postgres_admin_database(db_name) if IS_POSTGRES else None)
             if conn2:
-                conn2.cursor().execute(f"ALTER DATABASE [{db_name}] SET ONLINE")
+                if IS_MSSQL:
+                    conn2.cursor().execute(f"ALTER DATABASE [{db_name}] SET ONLINE")
+                else:
+                    conn2.cursor().execute(f"ALTER DATABASE {quote_pg_identifier(db_name)} WITH ALLOW_CONNECTIONS = true")
                 conn2.close()
                 bot.send_message(
                     message.chat.id,
@@ -753,6 +992,7 @@ def cmd_unknown(message):
 if __name__ == "__main__":
     logger.info("=" * 50)
     logger.info("🤖 DB Monitor Telegram Bot başlatılıyor...")
+    logger.info(f"🧠 Motor: {DB_ENGINE}")
     logger.info(f"🖥️  Sunucu: {DB_SERVER}")
     logger.info(f"👥 Yetkili kullanıcı sayısı: {len(ALLOWED_CHAT_IDS)}")
     logger.info(f"📡 Dinleme başlıyor (polling)...")
