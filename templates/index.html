@@ -733,25 +733,51 @@
 <script>
     // THEME HANDLING
     const htmlEl = document.documentElement;
+    const prefersLightQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+
+    function getStoredTheme() {
+        try {
+            return localStorage.getItem('dbm-theme') || 'dark';
+        } catch (_) {
+            return 'dark';
+        }
+    }
+
+    function setStoredTheme(value) {
+        try {
+            localStorage.setItem('dbm-theme', value);
+        } catch (_) {
+            // localStorage bazi tarayici modlarinda kapali olabilir.
+        }
+    }
+
     function getSystemTheme() {
-        return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        return prefersLightQuery && prefersLightQuery.matches ? 'light' : 'dark';
     }
     function applyTheme(theme) {
         const effective = theme === 'system' ? getSystemTheme() : theme;
         htmlEl.setAttribute('data-theme', effective);
         htmlEl.setAttribute('data-bs-theme', effective === 'light' ? 'light' : 'dark');
-        localStorage.setItem('dbm-theme', theme);
+        setStoredTheme(theme);
         const radios = document.querySelectorAll('input[name="themeOptions"]');
         radios.forEach(r => { r.checked = r.value === theme; });
     }
     (function initTheme() {
-        const saved = localStorage.getItem('dbm-theme') || 'dark';
+        const saved = getStoredTheme();
         applyTheme(saved);
-        // Listen system changes if system is chosen
-        window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', e => {
-            const current = localStorage.getItem('dbm-theme') || 'dark';
+
+        if (!prefersLightQuery) return;
+
+        // Safari uyumlulugu icin addEventListener/addListener fallback'i.
+        const onThemeChange = () => {
+            const current = getStoredTheme();
             if (current === 'system') applyTheme('system');
-        });
+        };
+        if (typeof prefersLightQuery.addEventListener === 'function') {
+            prefersLightQuery.addEventListener('change', onThemeChange);
+        } else if (typeof prefersLightQuery.addListener === 'function') {
+            prefersLightQuery.addListener(onThemeChange);
+        }
     })();
 
     document.querySelectorAll('input[name="themeOptions"]').forEach(radio => {
@@ -864,7 +890,7 @@
     function renderMonitoringList() {
         if (!dbMonitoringList) return;
 
-        const query = dbSearchInput?.value.toLowerCase().trim() || '';
+        const query = dbSearchInput ? dbSearchInput.value.toLowerCase().trim() : '';
         const toRender = query
             ? monitoringDatabases.filter(db => db.name.toLowerCase().includes(query))
             : monitoringDatabases;
@@ -950,13 +976,17 @@
 
     if (selectAllDbBtn) {
         selectAllDbBtn.addEventListener('click', () => {
-            dbMonitoringList?.querySelectorAll('.db-monitor-item').forEach(el => { el.checked = true; });
+            if (dbMonitoringList) {
+                dbMonitoringList.querySelectorAll('.db-monitor-item').forEach(el => { el.checked = true; });
+            }
         });
     }
 
     if (clearAllDbBtn) {
         clearAllDbBtn.addEventListener('click', () => {
-            dbMonitoringList?.querySelectorAll('.db-monitor-item').forEach(el => { el.checked = false; });
+            if (dbMonitoringList) {
+                dbMonitoringList.querySelectorAll('.db-monitor-item').forEach(el => { el.checked = false; });
+            }
         });
     }
 
@@ -966,13 +996,29 @@
 
     loadMonitoringDatabases();
 
+    async function readJsonOrText(res) {
+        const raw = await res.text();
+        if (!raw) return {};
+        try {
+            return JSON.parse(raw);
+        } catch (_) {
+            return { error: raw };
+        }
+    }
+
     async function waitForRunCheckCompletion(maxWaitMs = 240000) {
         const startedAt = Date.now();
         while ((Date.now() - startedAt) < maxWaitMs) {
-            const res = await fetch('/api/run-check-status', { cache: 'no-store' });
-            const state = await res.json();
+            const res = await fetch('/api/run-check-status', {
+                cache: 'no-store',
+                credentials: 'same-origin'
+            });
+            const state = await readJsonOrText(res);
 
             if (!res.ok) {
+                if (res.status === 401) {
+                    throw new Error('Oturum dogrulamasi gerekiyor. Sayfayi yenileyip tekrar giris yapin.');
+                }
                 throw new Error(state.error || 'Kontrol durumu alinamadi');
             }
 
@@ -996,10 +1042,11 @@
             try {
                 const res = await fetch('/api/run-check', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin'
                 });
 
-                const data = await res.json();
+                const data = await readJsonOrText(res);
                 if (!res.ok) throw new Error(data.error || 'Test baslatilamadi');
 
                 if (!['started', 'running'].includes(data.status)) {
@@ -1444,15 +1491,16 @@
     function renderBlockingSummary(summary) {
         const el = document.getElementById('wait-blocking-summary');
         if (!el) return;
-        const top = (summary?.top_blocking_waits || []).map(w => `${w.wait_type} (${w.count})`).join(', ');
+        const safeSummary = summary || {};
+        const top = (safeSummary.top_blocking_waits || []).map(w => `${w.wait_type} (${w.count})`).join(', ');
         el.innerHTML = `
             <div class="d-flex justify-content-between py-1">
                 <span>Blocked Session</span>
-                <span class="text-light fw-semibold">${summary?.blocked_sessions || 0}</span>
+                <span class="text-light fw-semibold">${safeSummary.blocked_sessions || 0}</span>
             </div>
             <div class="d-flex justify-content-between py-1">
                 <span>Blocking Session</span>
-                <span class="text-light fw-semibold">${summary?.blocking_sessions || 0}</span>
+                <span class="text-light fw-semibold">${safeSummary.blocking_sessions || 0}</span>
             </div>
             <div class="pt-2 border-top border-secondary border-opacity-25">
                 <span class="text-secondary">Top Blocking Wait:</span>
@@ -1558,10 +1606,10 @@
     function applyFiltersAndPaginate() {
         if (!table) return;
         const rows = Array.from(table.querySelectorAll('tbody tr'));
-        const q = (searchInput?.value || '').toLowerCase();
-        const start = parseDate(startInput?.value);
-        const end = parseDate(endInput?.value);
-        const pageSize = parseInt(pageSizeSelect?.value || '20', 10);
+        const q = (searchInput ? searchInput.value : '').toLowerCase();
+        const start = parseDate(startInput ? startInput.value : null);
+        const end = parseDate(endInput ? endInput.value : null);
+        const pageSize = parseInt(pageSizeSelect ? pageSizeSelect.value : '20', 10);
 
         const filtered = rows.filter(row => {
             const text = row.innerText.toLowerCase();
