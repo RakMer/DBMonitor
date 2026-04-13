@@ -707,7 +707,9 @@ def take_backup(message):
     try:
         zaman = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_suffix = "full" if backup_type == "full" else "diff"
-        backup_ext = ".bak" if IS_MSSQL else ".backup"
+        postgres_docker_container = (os.getenv("POSTGRES_DOCKER_CONTAINER") or "").strip() if IS_POSTGRES else ""
+        pg_dump_bin = (os.getenv("PG_DUMP_BIN") or os.getenv("PG_DUMP") or "pg_dump").strip() or "pg_dump"
+        backup_ext = ".bak" if IS_MSSQL else (".sql" if postgres_docker_container else ".backup")
         backup_yolu = os.path.join(backup_dir, f"{db_name}_{backup_suffix}_{zaman}{backup_ext}")
 
         tur_etiketi = "Tam (Full)" if backup_type == "full" else "Diferansiyel (Diff)"
@@ -735,34 +737,60 @@ def take_backup(message):
                 pass
 
         else:
-            conn.close()
-            pg_dump_bin = (os.getenv("PG_DUMP_BIN") or "pg_dump").strip() or "pg_dump"
-            pg_port = str(DB_PORT or "5432")
-            cmd = [
-                pg_dump_bin,
-                "-h", str(DB_SERVER),
-                "-p", pg_port,
-                "-U", str(DB_USER),
-                "-d", str(db_name),
-                "-F", "c",
-                "-f", backup_yolu,
-            ]
+            if conn:
+                conn.close()
+            timeout_sec = max(30, int(os.getenv("PG_BACKUP_TIMEOUT_SEC", "600")))
 
-            env = os.environ.copy()
-            env["PGPASSWORD"] = str(DB_PASSWORD or "")
-            result = subprocess.run(
-                cmd,
-                env=env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                timeout=max(30, int(os.getenv("PG_BACKUP_TIMEOUT_SEC", "600"))),
-                check=False,
-            )
-            if result.returncode != 0:
-                err_text = (result.stderr or result.stdout or "Bilinmeyen hata").strip()
-                raise RuntimeError(err_text[:500])
+            if postgres_docker_container:
+                cmd = ["docker", "exec", "-i"]
+                if DB_PASSWORD:
+                    cmd.extend(["-e", f"PGPASSWORD={DB_PASSWORD}"])
+                cmd.extend([
+                    postgres_docker_container,
+                    pg_dump_bin,
+                    "-U", str(DB_USER),
+                    str(db_name),
+                ])
+
+                with open(backup_yolu, "wb") as dump_file:
+                    result = subprocess.run(
+                        cmd,
+                        stdout=dump_file,
+                        stderr=subprocess.PIPE,
+                        timeout=timeout_sec,
+                        check=False,
+                    )
+
+                if result.returncode != 0:
+                    err_text = (result.stderr or b"").decode("utf-8", errors="ignore").strip() or "Bilinmeyen hata"
+                    raise RuntimeError(err_text[:500])
+            else:
+                pg_port = str(DB_PORT or "5432")
+                cmd = [
+                    pg_dump_bin,
+                    "-h", str(DB_SERVER),
+                    "-p", pg_port,
+                    "-U", str(DB_USER),
+                    "-d", str(db_name),
+                    "-F", "c",
+                    "-f", backup_yolu,
+                ]
+
+                env = os.environ.copy()
+                env["PGPASSWORD"] = str(DB_PASSWORD or "")
+                result = subprocess.run(
+                    cmd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    timeout=timeout_sec,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    err_text = (result.stderr or result.stdout or "Bilinmeyen hata").strip()
+                    raise RuntimeError(err_text[:500])
 
         # BACKUP komutu hatasiz tamamlandiysa islemi basarili kabul et.
         # Bot ve SQL farkli sunucularda calisiyorsa dosya yolu bot tarafinda gorunmeyebilir.
