@@ -56,6 +56,8 @@ def _backup_content_mentions_database(content: str, db_name: str) -> bool:
         rf"create\s+database\s+(?:if\s+not\s+exists\s+)?\"?{db_escaped}\"?",
         rf"\\connect\s+\"?{db_escaped}\"?",
         rf"--\s*database\s*:\s*\"?{db_escaped}\"?",
+        rf"--\s*name\s*:\s*\"?{db_escaped}\"?\s*;\s*type\s*:\s*database",
+        rf"alter\s+database\s+\"?{db_escaped}\"?",
     )
     return any(re.search(pattern, content, flags=re.IGNORECASE) for pattern in patterns)
 
@@ -245,13 +247,10 @@ def _get_postgres_storage_paths(cursor) -> list[str]:
     return unique_paths
 
 
-def _find_recent_backed_up_databases(
-    db_names: list[str],
-    backup_dir: str,
-    max_age_hours: int,
-) -> set[str]:
-    if not db_names or not backup_dir or not os.path.isdir(backup_dir):
-        return set()
+def _collect_recent_backup_files(backup_dir: str, max_age_hours: int) -> list[tuple[str, str]]:
+    """Collect recent candidate backup files from BACKUP_DIR."""
+    if not backup_dir or not os.path.isdir(backup_dir):
+        return []
 
     cutoff_epoch = time.time() - (max(1, int(max_age_hours)) * 3600)
     recent_files: list[tuple[str, str]] = []
@@ -275,13 +274,43 @@ def _find_recent_backed_up_databases(
 
                 recent_files.append((name_lower, entry.path))
     except OSError:
-        return set()
+        return []
 
-    if not recent_files:
-        return set()
+    return recent_files
+
+
+def _is_probable_cluster_backup_file(file_name_lower: str, content: str) -> bool:
+    token = _normalize_backup_token(file_name_lower)
+    filename_markers = (
+        "pgdumpall",
+        "alldatabases",
+        "all_dbs",
+        "clusterbackup",
+        "clusterdump",
+    )
+    if any(marker in token for marker in filename_markers):
+        return True
+
+    content_lower = str(content or "").lower()
+    content_markers = (
+        "database cluster dump",
+        "pg_dumpall",
+        "-- globals",
+    )
+    return any(marker in content_lower for marker in content_markers)
+
+
+def _match_recent_backup_files_to_databases(
+    db_names: list[str],
+    recent_files: list[tuple[str, str]],
+) -> tuple[set[str], bool]:
+    """Match DB names against recent backup files by filename and file head content."""
+    if not db_names or not recent_files:
+        return set(), False
 
     normalized_file_names = [_normalize_backup_token(name) for name, _path in recent_files]
     matched: set[str] = set()
+    cluster_backup_detected = False
 
     for db_name in db_names:
         db_token = _normalize_backup_token(db_name)
@@ -291,14 +320,17 @@ def _find_recent_backed_up_databases(
             matched.add(db_name)
 
     unmatched = [db_name for db_name in db_names if db_name not in matched]
-    if not unmatched:
-        return matched
-
-    for _name_lower, file_path in recent_files:
+    for name_lower, file_path in recent_files:
         try:
             with open(file_path, "rb") as backup_file:
                 content = backup_file.read(POSTGRES_BACKUP_CONTENT_SCAN_BYTES).decode("utf-8", errors="ignore")
         except OSError:
+            continue
+
+        if _is_probable_cluster_backup_file(name_lower, content):
+            cluster_backup_detected = True
+
+        if not unmatched:
             continue
 
         for db_name in unmatched:
@@ -307,7 +339,47 @@ def _find_recent_backed_up_databases(
             if _backup_content_mentions_database(content, db_name):
                 matched.add(db_name)
 
-    return matched
+    if cluster_backup_detected:
+        matched.update(db_names)
+
+    return matched, cluster_backup_detected
+
+
+def _get_postgres_archive_backup_signal(cursor, max_age_hours: int) -> tuple[bool | None, str]:
+    """Return archive signal status as (has_recent_signal|None, reason)."""
+    try:
+        cursor.execute(
+            """
+            SELECT
+                LOWER(COALESCE(current_setting('archive_mode'), 'off')) AS archive_mode,
+                (
+                    (last_archived_time IS NOT NULL
+                     AND last_archived_time >= clock_timestamp() - (%s * INTERVAL '1 hour'))
+                    OR
+                    (
+                        last_archived_time IS NULL
+                        AND COALESCE(archived_count, 0) = 0
+                        AND stats_reset IS NOT NULL
+                        AND stats_reset >= clock_timestamp() - (%s * INTERVAL '1 hour')
+                    )
+                ) AS has_recent_archive_signal
+            FROM pg_stat_archiver
+            """,
+            (max_age_hours, max_age_hours),
+        )
+    except Exception:
+        return None, "pg_stat_archiver_unavailable"
+
+    row = cursor.fetchone()
+    if not row:
+        return None, "pg_stat_archiver_no_rows"
+
+    archive_mode = str(row[0] or "off").strip().lower()
+    if archive_mode not in {"on", "always"}:
+        return None, f"archive_mode_{archive_mode}"
+
+    has_recent_archive_signal = bool(row[1])
+    return has_recent_archive_signal, "archive_signal_ok" if has_recent_archive_signal else "archive_signal_stale"
 
 
 def _probe_postgres_db_connectivity(db_names: list[str]) -> list[tuple[str, str]]:
@@ -364,6 +436,90 @@ def _probe_postgres_db_connectivity(db_names: list[str]) -> list[tuple[str, str]
     return unreachable
 
 
+def _connect_postgres_env_db(database_name: str, timeout_sec: int = 5):
+    """Open a PostgreSQL connection using DB_* environment variables."""
+    db_server = (os.getenv("DB_SERVER") or "").strip()
+    db_user = (os.getenv("DB_USER") or "").strip()
+    db_password = os.getenv("DB_PASSWORD") or ""
+    db_port = (os.getenv("DB_PORT") or "5432").strip()
+
+    if not db_server or not db_user or not database_name:
+        return None
+
+    try:
+        import psycopg2
+    except Exception:
+        return None
+
+    try:
+        return psycopg2.connect(
+            host=db_server,
+            port=db_port,
+            dbname=database_name,
+            user=db_user,
+            password=db_password,
+            connect_timeout=max(1, int(timeout_sec)),
+        )
+    except Exception:
+        return None
+
+
+def _detect_postgres_schedulers(job_cursor) -> list[str]:
+    """Detect installed PostgreSQL scheduler extensions/tables in current DB."""
+    schedulers: list[str] = []
+
+    # pg_cron detection
+    try:
+        job_cursor.execute(
+            """
+            SELECT n.nspname
+            FROM pg_extension e
+            JOIN pg_namespace n ON n.oid = e.extnamespace
+            WHERE e.extname = 'pg_cron'
+            """
+        )
+        row = job_cursor.fetchone()
+    except Exception:
+        row = None
+
+    if row and row[0]:
+        raw_schema = str(row[0])
+        candidate_schemas: list[str] = []
+        for candidate in ("cron", raw_schema):
+            if candidate and candidate not in candidate_schemas:
+                candidate_schemas.append(candidate)
+
+        for candidate in candidate_schemas:
+            if not _is_safe_sql_identifier(candidate):
+                continue
+            try:
+                job_cursor.execute(
+                    "SELECT to_regclass(%s), to_regclass(%s)",
+                    (f"{candidate}.job_run_details", f"{candidate}.job"),
+                )
+                reg_rows = job_cursor.fetchone()
+            except Exception:
+                continue
+
+            has_run_details = bool(reg_rows and reg_rows[0])
+            has_job_table = bool(reg_rows and reg_rows[1])
+            if has_run_details and has_job_table:
+                schedulers.append("pg_cron")
+                break
+
+    # pgAgent detection
+    try:
+        job_cursor.execute("SELECT to_regclass('pgagent.pga_joblog'), to_regclass('pgagent.pga_job')")
+        reg_rows = job_cursor.fetchone()
+        has_pgagent = bool(reg_rows and reg_rows[0]) and bool(reg_rows and reg_rows[1])
+        if has_pgagent:
+            schedulers.append("pgAgent")
+    except Exception:
+        pass
+
+    return schedulers
+
+
 class HealthCheckStrategy(ABC):
     """Abstract query strategy used by the monitoring loop."""
 
@@ -388,6 +544,10 @@ class HealthCheckStrategy(ABC):
         max_age_hours: int,
     ) -> list[str] | None:
         """Return DB names without fresh backups, or None if check is unsupported."""
+
+    def get_backup_check_info(self) -> dict[str, object] | None:
+        """Return latest backup-check metadata collected by get_missing_backups."""
+        return None
 
     @abstractmethod
     def get_disk_usage(self, cursor) -> list[dict[str, object]] | None:
@@ -450,6 +610,16 @@ class HealthCheckStrategy(ABC):
     @abstractmethod
     def get_failed_jobs(self, cursor) -> list[str] | None:
         """Return failed job names, or None if unsupported."""
+
+    def get_job_scheduler_info(self, cursor) -> dict[str, object] | None:
+        """Return scheduler presence metadata for observability.
+
+        Optional keys:
+        - found: bool
+        - schedulers: list[str]
+        - database: str
+        """
+        return None
 
     @abstractmethod
     def get_auto_growth_files(self, cursor) -> list[dict[str, object]] | None:
@@ -678,6 +848,9 @@ class MSSQLHealthStrategy(HealthCheckStrategy):
         )
         return [str(row[0]) for row in cursor.fetchall()]
 
+    def get_job_scheduler_info(self, cursor) -> dict[str, object] | None:
+        return {"found": True, "schedulers": ["SQL Agent"], "database": "msdb"}
+
     def get_auto_growth_files(self, cursor) -> list[dict[str, object]] | None:
         cursor.execute(
             """
@@ -721,6 +894,9 @@ class PostgresHealthStrategy(HealthCheckStrategy):
       do not have direct PostgreSQL equivalents and return None.
     - Index fragmentation is approximated via dead tuple ratio (table bloat proxy).
     """
+
+    def __init__(self) -> None:
+        self._last_backup_check_info: dict[str, object] | None = None
 
     @property
     def engine_name(self) -> str:
@@ -790,6 +966,8 @@ class PostgresHealthStrategy(HealthCheckStrategy):
         excluded_databases: set[str],
         max_age_hours: int,
     ) -> list[str] | None:
+        self._last_backup_check_info = None
+
         cursor.execute(
             """
             SELECT datname
@@ -803,54 +981,83 @@ class PostgresHealthStrategy(HealthCheckStrategy):
 
         excluded_lower = {str(name).lower() for name in excluded_databases}
         candidate_dbs = [name for name in db_names if name.lower() not in excluded_lower]
-        if not candidate_dbs:
-            return []
+
+        backup_mode = (os.getenv("POSTGRES_BACKUP_MODE") or "auto").strip().lower()
+        if backup_mode not in {"auto", "file", "archive", "file_or_archive"}:
+            backup_mode = "auto"
 
         backup_dir = os.getenv("BACKUP_DIR", "").strip()
-        backed_up_from_files = _find_recent_backed_up_databases(candidate_dbs, backup_dir, max_age_hours)
-        if backed_up_from_files:
-            return [name for name in candidate_dbs if name not in backed_up_from_files]
+        backup_dir_configured = bool(backup_dir)
 
-        # PostgreSQL has no built-in per-database backup catalog like MSDB.
-        # We use WAL archive recency as a practical cluster-level backup signal.
-        try:
-            cursor.execute(
-                """
-                SELECT
-                    LOWER(COALESCE(current_setting('archive_mode'), 'off')) AS archive_mode,
-                    (
-                        (last_archived_time IS NOT NULL
-                         AND last_archived_time >= clock_timestamp() - (%s * INTERVAL '1 hour'))
-                        OR
-                        (
-                            last_archived_time IS NULL
-                            AND COALESCE(archived_count, 0) = 0
-                            AND stats_reset IS NOT NULL
-                            AND stats_reset >= clock_timestamp() - (%s * INTERVAL '1 hour')
-                        )
-                    ) AS has_recent_archive_signal
-                FROM pg_stat_archiver
-                """,
-                (max_age_hours, max_age_hours),
-            )
-        except Exception:
-            return None
+        info: dict[str, object] = {
+            "engine": "postgres",
+            "mode": backup_mode,
+            "source": "none",
+            "candidate_count": len(candidate_dbs),
+            "candidate_databases": list(candidate_dbs),
+            "backup_dir_configured": backup_dir_configured,
+            "backup_dir": backup_dir,
+            "status": "ok",
+            "reason": "",
+        }
 
-        row = cursor.fetchone()
-        if not row:
-            return None
-
-        archive_mode = str(row[0] or "off")
-        has_recent_archive_signal = bool(row[1])
-
-        if archive_mode not in {"on", "always"}:
-            # Without archive mode or file evidence, a reliable freshness check is unavailable.
-            return None
-
-        if has_recent_archive_signal:
+        if not candidate_dbs:
+            info.update({"source": "none", "missing_count": 0, "matched_count": 0})
+            self._last_backup_check_info = info
             return []
 
-        return candidate_dbs
+        def finalize(result: list[str] | None, **extra: object) -> list[str] | None:
+            info.update(extra)
+            if result is None:
+                info["status"] = "unsupported"
+                info["missing_count"] = None
+            else:
+                info["status"] = "ok"
+                info["missing_count"] = len(result)
+                info["matched_count"] = len(candidate_dbs) - len(result)
+            self._last_backup_check_info = info
+            return result
+
+        # FILE MODE (explicit or auto when BACKUP_DIR is configured)
+        file_mode_selected = (
+            backup_mode == "file"
+            or (backup_mode in {"auto", "file_or_archive"} and backup_dir_configured)
+        )
+
+        if file_mode_selected:
+            if not backup_dir_configured:
+                return finalize(None, source="files", reason="backup_dir_not_configured")
+            if not os.path.isdir(backup_dir):
+                return finalize(None, source="files", reason="backup_dir_not_found")
+
+            recent_files = _collect_recent_backup_files(backup_dir, max_age_hours)
+            matched_dbs, cluster_file_detected = _match_recent_backup_files_to_databases(candidate_dbs, recent_files)
+            missing = [name for name in candidate_dbs if name not in matched_dbs]
+
+            return finalize(
+                missing,
+                source="files",
+                reason="files_evaluated",
+                recent_backup_file_count=len(recent_files),
+                cluster_file_detected=cluster_file_detected,
+            )
+
+        # ARCHIVE MODE (explicit, or auto when no BACKUP_DIR is configured)
+        archive_mode_selected = backup_mode in {"archive", "auto", "file_or_archive"}
+        if archive_mode_selected:
+            has_recent_archive_signal, archive_reason = _get_postgres_archive_backup_signal(cursor, max_age_hours)
+            if has_recent_archive_signal is None:
+                return finalize(None, source="archive", reason=archive_reason)
+            if has_recent_archive_signal:
+                return finalize([], source="archive", reason=archive_reason)
+            return finalize(list(candidate_dbs), source="archive", reason=archive_reason)
+
+        return finalize(None, source="none", reason="invalid_backup_mode")
+
+    def get_backup_check_info(self) -> dict[str, object] | None:
+        if self._last_backup_check_info is None:
+            return None
+        return dict(self._last_backup_check_info)
 
     def get_disk_usage(self, cursor) -> list[dict[str, object]] | None:
         candidate_paths = _get_postgres_storage_paths(cursor)
@@ -1108,119 +1315,230 @@ class PostgresHealthStrategy(HealthCheckStrategy):
         return _count_auth_failures_from_docker_logs(docker_container, window_hours)
 
     def get_failed_jobs(self, cursor) -> list[str] | None:
-        try:
-            cursor.execute(
-                """
-                SELECT n.nspname
-                FROM pg_extension e
-                JOIN pg_namespace n ON n.oid = e.extnamespace
-                WHERE e.extname = 'pg_cron'
-                """
-            )
-            row = cursor.fetchone()
-        except Exception:
-            return None
+        lookback_hours = max(1, int(os.getenv("POSTGRES_JOB_LOOKBACK_HOURS", "24")))
 
-        failed_jobs: list[str] = []
-        has_pg_cron = bool(row and row[0])
+        def _collect_failed_jobs_with_cursor(job_cursor) -> tuple[list[str] | None, bool]:
+            failed_jobs: list[str] = []
+            scheduler_found = False
+            query_failed = False
 
-        if has_pg_cron:
-            raw_schema = str(row[0])
-            candidate_schemas = []
-            for candidate in ("cron", raw_schema):
-                if candidate and candidate not in candidate_schemas:
-                    candidate_schemas.append(candidate)
-
-            schema_name = None
-            for candidate in candidate_schemas:
-                if not _is_safe_sql_identifier(candidate):
-                    continue
+            # pg_cron (per-database extension)
+            schedulers = _detect_postgres_schedulers(job_cursor)
+            has_pg_cron = "pg_cron" in schedulers
+            if has_pg_cron:
+                scheduler_found = True
+                # Re-fetch extension schema used by pg_cron for query construction.
                 try:
-                    cursor.execute(
-                        "SELECT to_regclass(%s), to_regclass(%s)",
-                        (f"{candidate}.job_run_details", f"{candidate}.job"),
+                    job_cursor.execute(
+                        """
+                        SELECT n.nspname
+                        FROM pg_extension e
+                        JOIN pg_namespace n ON n.oid = e.extnamespace
+                        WHERE e.extname = 'pg_cron'
+                        """
                     )
-                    reg_rows = cursor.fetchone()
+                    row = job_cursor.fetchone()
                 except Exception:
-                    continue
+                    row = None
 
-                has_run_details = bool(reg_rows and reg_rows[0])
-                has_job_table = bool(reg_rows and reg_rows[1])
-                if has_run_details and has_job_table:
-                    schema_name = candidate
-                    break
+                raw_schema = str(row[0] or "cron")
+                candidate_schemas = []
+                for candidate in ("cron", raw_schema):
+                    if candidate and candidate not in candidate_schemas:
+                        candidate_schemas.append(candidate)
 
-            if not schema_name:
-                return None
+                schema_name = None
+                for candidate in candidate_schemas:
+                    if not _is_safe_sql_identifier(candidate):
+                        continue
+                    try:
+                        job_cursor.execute(
+                            "SELECT to_regclass(%s), to_regclass(%s)",
+                            (f"{candidate}.job_run_details", f"{candidate}.job"),
+                        )
+                        reg_rows = job_cursor.fetchone()
+                    except Exception:
+                        continue
 
-            schema_quoted = _quote_pg_identifier(schema_name)
-            query = f"""
-            SELECT
-                d.jobid,
-                COALESCE(d.command, j.command, '') AS command_text,
-                COALESCE(d.status, 'unknown') AS run_status
-            FROM {schema_quoted}.job_run_details d
-            LEFT JOIN {schema_quoted}.job j ON j.jobid = d.jobid
-            WHERE COALESCE(d.end_time, d.start_time) >= (clock_timestamp() - INTERVAL '24 hours')
-              AND LOWER(COALESCE(d.status, '')) NOT IN ('succeeded', 'success')
-            ORDER BY COALESCE(d.end_time, d.start_time) DESC
-            LIMIT 100
-            """
+                    has_run_details = bool(reg_rows and reg_rows[0])
+                    has_job_table = bool(reg_rows and reg_rows[1])
+                    if has_run_details and has_job_table:
+                        schema_name = candidate
+                        break
+
+                if schema_name:
+                    schema_quoted = _quote_pg_identifier(schema_name)
+                    query = f"""
+                    SELECT
+                        d.jobid,
+                        COALESCE(d.command, j.command, '') AS command_text,
+                        COALESCE(d.status, 'unknown') AS run_status
+                    FROM {schema_quoted}.job_run_details d
+                    LEFT JOIN {schema_quoted}.job j ON j.jobid = d.jobid
+                    WHERE COALESCE(d.end_time, d.start_time) >= (clock_timestamp() - (%s * INTERVAL '1 hour'))
+                      AND LOWER(COALESCE(d.status, '')) NOT IN ('succeeded', 'success')
+                    ORDER BY COALESCE(d.end_time, d.start_time) DESC
+                    LIMIT 100
+                    """
+
+                    try:
+                        job_cursor.execute(query, (lookback_hours,))
+                        rows = job_cursor.fetchall()
+                    except Exception:
+                        query_failed = True
+                        rows = []
+
+                    for jobid, command_text, run_status in rows:
+                        status_text = str(run_status or "unknown")
+                        command_short = str(command_text or "").strip().replace("\n", " ")
+                        if len(command_short) > 80:
+                            command_short = command_short[:77] + "..."
+                        failed_jobs.append(f"pg_cron job #{jobid} status={status_text} command='{command_short}'")
+                else:
+                    query_failed = True
+
+            # pgAgent fallback (if installed)
+            has_pgagent = "pgAgent" in schedulers
+
+            if has_pgagent:
+                scheduler_found = True
+                try:
+                    job_cursor.execute(
+                        """
+                        SELECT
+                            j.jobname,
+                            l.jlgstatus,
+                            l.jlgstart
+                        FROM pgagent.pga_joblog l
+                        JOIN pgagent.pga_job j ON j.jobid = l.jlgjobid
+                        WHERE l.jlgstart >= (clock_timestamp() - (%s * INTERVAL '1 hour'))
+                          AND COALESCE(l.jlgstatus, '') NOT IN ('s', 'S')
+                        ORDER BY l.jlgstart DESC
+                        LIMIT 100
+                        """,
+                        (lookback_hours,),
+                    )
+                    pgagent_rows = job_cursor.fetchall()
+                except Exception:
+                    query_failed = True
+                    pgagent_rows = []
+
+                for jobname, status, started_at in pgagent_rows:
+                    failed_jobs.append(f"pgAgent job '{jobname}' status={status} start={started_at}")
+
+            if not scheduler_found:
+                return [], False
+            if query_failed and not failed_jobs:
+                return None, True
+            return failed_jobs, True
+
+        local_jobs, local_has_scheduler = _collect_failed_jobs_with_cursor(cursor)
+        if local_has_scheduler and local_jobs is not None:
+            return local_jobs
+
+        scheduler_query_failed = bool(local_has_scheduler and local_jobs is None)
+
+        current_db = ""
+        try:
+            cursor.execute("SELECT current_database()")
+            row = cursor.fetchone()
+            current_db = str(row[0] or "") if row else ""
+        except Exception:
+            current_db = ""
+
+        candidate_job_dbs: list[str] = []
+        env_job_db = (os.getenv("POSTGRES_JOB_DB") or "").strip()
+        for db_name in (env_job_db, "postgres"):
+            if not db_name:
+                continue
+            if db_name == current_db:
+                continue
+            if db_name in candidate_job_dbs:
+                continue
+            candidate_job_dbs.append(db_name)
+
+        connect_timeout = max(2, int(os.getenv("POSTGRES_JOB_CONNECT_TIMEOUT_SEC", "5")))
+        for db_name in candidate_job_dbs:
+            job_conn = _connect_postgres_env_db(db_name, timeout_sec=connect_timeout)
+            if not job_conn:
+                continue
 
             try:
-                cursor.execute(query)
-                rows = cursor.fetchall()
-            except Exception:
-                return None
+                job_cursor = job_conn.cursor()
+                remote_jobs, remote_has_scheduler = _collect_failed_jobs_with_cursor(job_cursor)
+            finally:
+                try:
+                    job_conn.close()
+                except Exception:
+                    pass
 
-            for jobid, command_text, run_status in rows:
-                status_text = str(run_status or "unknown")
-                command_short = str(command_text or "").strip().replace("\n", " ")
-                if len(command_short) > 80:
-                    command_short = command_short[:77] + "..."
-                failed_jobs.append(f"pg_cron job #{jobid} status={status_text} command='{command_short}'")
+            if remote_has_scheduler:
+                if remote_jobs is None:
+                    scheduler_query_failed = True
+                    continue
+                return remote_jobs
 
-            return failed_jobs
+        if scheduler_query_failed:
+            return None
 
-        # pgAgent fallback (if installed).
+        # No scheduler extensions detected on reachable DBs.
+        return []
+
+    def get_job_scheduler_info(self, cursor) -> dict[str, object] | None:
+        current_db = ""
         try:
-            cursor.execute("SELECT to_regclass('pgagent.pga_joblog')")
-            pgagent_joblog = cursor.fetchone()
-            cursor.execute("SELECT to_regclass('pgagent.pga_job')")
-            pgagent_job = cursor.fetchone()
+            cursor.execute("SELECT current_database()")
+            row = cursor.fetchone()
+            current_db = str(row[0] or "") if row else ""
         except Exception:
-            return None
+            current_db = ""
 
-        has_pgagent = bool(pgagent_joblog and pgagent_joblog[0]) and bool(pgagent_job and pgagent_job[0])
-        if not has_pgagent:
-            return None
+        local_schedulers = _detect_postgres_schedulers(cursor)
+        if local_schedulers:
+            return {
+                "found": True,
+                "schedulers": local_schedulers,
+                "database": current_db,
+            }
 
-        try:
-            cursor.execute(
-                """
-                SELECT
-                    j.jobname,
-                    l.jlgstatus,
-                    l.jlgstart
-                FROM pgagent.pga_joblog l
-                JOIN pgagent.pga_job j ON j.jobid = l.jlgjobid
-                WHERE l.jlgstart >= (clock_timestamp() - INTERVAL '24 hours')
-                  AND COALESCE(l.jlgstatus, '') NOT IN ('s', 'S')
-                ORDER BY l.jlgstart DESC
-                LIMIT 100
-                """
-            )
-            pgagent_rows = cursor.fetchall()
-        except Exception:
-            return None
+        candidate_job_dbs: list[str] = []
+        env_job_db = (os.getenv("POSTGRES_JOB_DB") or "").strip()
+        for db_name in (env_job_db, "postgres"):
+            if not db_name:
+                continue
+            if db_name == current_db:
+                continue
+            if db_name in candidate_job_dbs:
+                continue
+            candidate_job_dbs.append(db_name)
 
-        if not pgagent_rows:
-            return []
+        connect_timeout = max(2, int(os.getenv("POSTGRES_JOB_CONNECT_TIMEOUT_SEC", "5")))
+        for db_name in candidate_job_dbs:
+            job_conn = _connect_postgres_env_db(db_name, timeout_sec=connect_timeout)
+            if not job_conn:
+                continue
 
-        for jobname, status, started_at in pgagent_rows:
-            failed_jobs.append(f"pgAgent job '{jobname}' status={status} start={started_at}")
+            try:
+                job_cursor = job_conn.cursor()
+                schedulers = _detect_postgres_schedulers(job_cursor)
+            finally:
+                try:
+                    job_conn.close()
+                except Exception:
+                    pass
 
-        return failed_jobs
+            if schedulers:
+                return {
+                    "found": True,
+                    "schedulers": schedulers,
+                    "database": db_name,
+                }
+
+        return {
+            "found": False,
+            "schedulers": [],
+            "database": current_db,
+        }
 
     def get_auto_growth_files(self, cursor) -> list[dict[str, object]] | None:
         candidate_paths = _get_postgres_storage_paths(cursor)
