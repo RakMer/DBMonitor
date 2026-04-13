@@ -3,8 +3,8 @@
 Bu dokuman, projeyi devralacak baska bir yapay zekanin kod tabanini hizlica ve dogru sekilde anlamasi icin hazirlanmistir.
 
 ## 1. Projenin Amaci
-DBMonitor, MSSQL saglik izleme ve operasyon araci olarak calisir.
-- MSSQL metriklerini toplar.
+DBMonitor, veritabani saglik izleme ve operasyon araci olarak calisir.
+- MSSQL ve PostgreSQL metriklerini toplar.
 - 100 uzerinden saglik skoru hesaplar.
 - Sonuclari SQLite'a yazar.
 - Flask dashboard uzerinden gorsellestirir.
@@ -13,6 +13,8 @@ DBMonitor, MSSQL saglik izleme ve operasyon araci olarak calisir.
 Ana dosyalar:
 - app.py
 - Test.py
+- health_strategies.py
+- db_adapters.py
 - telegram_listener.py
 - templates/index.html
 - dbmonitor.sqlite3
@@ -21,22 +23,27 @@ Ana dosyalar:
 Sistem 3 ana surec ve 1 paylasilan depodan olusur:
 
 1) Monitor motoru (Test.py)
-- MSSQL'e pyodbc ile baglanir.
-- Kontrolleri calistirir.
+- `get_db_runtime()` ile aktif motoru (mssql/postgres) alir.
+- Kontrolleri sirali calistirir.
 - Ceza listesi ve skor uretir.
 - SQLite'a yazar.
 - Skor esiginin altina dusunce Telegram bildirimi gonderir.
 
-2) Web/API katmani (app.py)
+2) Strategy/Adapter katmani (health_strategies.py + db_adapters.py)
+- `db_adapters.py`: baglanti/driver ve motor secimi.
+- `health_strategies.py`: motora ozel sorgular (MSSQLHealthStrategy, PostgresHealthStrategy).
+
+3) Web/API katmani (app.py)
 - Dashboard HTML render eder.
 - Ayar endpointlerini, run-check endpointlerini, kaynak ve wait analizi endpointlerini saglar.
 - Test.py dosyasini arka thread + subprocess ile tetikler.
+- `/api/monitoring-databases` canli DB listesini aktif motordan alir.
 
-3) Telegram dinleyici (telegram_listener.py)
+4) Telegram dinleyici (telegram_listener.py)
 - Whitelist tabanli komut kabul eder.
 - DB status/list/start/stop/restart/backup/check komutlarini calistirir.
 
-4) Veri deposu (dbmonitor.sqlite3)
+5) Veri deposu (dbmonitor.sqlite3)
 - HealthHistory
 - PenaltyLog
 - MonitoringConfig
@@ -49,33 +56,55 @@ Sistem 3 ana surec ve 1 paylasilan depodan olusur:
 1. Test.py kontrolu calisir.
 2. Skor ve cezalar SQLite tablolarina kaydolur.
 3. app.py bu kayitlari okuyup dashboard ve API yaniti uretir.
-4. Telegram komutu /check cagrildiginda Test.py tekrar calistirilabilir.
+4. Telegram komutu `/check` cagrildiginda Test.py tekrar calistirilabilir.
 5. Alarm modunda Test.py Telegram API'ye dogrudan mesaj gonderir.
 
 ## 4. Health Score Mantigi (Mevcut)
 Baslangic skor: 100
 
 Kontroller (sira ve temel ceza mantigi):
-1. SQL Agent durumu: calismiyorsa -30
+1. SQL Agent durumu (MSSQL): calismiyorsa -30
 2. Offline veritabanlari: her biri -20
 3. Yedekleme tazeligi: uygun yedek yoksa toplu -50
 4. Disk doluluk: kritikte -40, uyarida -10
 5. Memory pressure: varsa -20
 6. Blocking: her blok kaydi -10
 7. Query stats (uzun/buyuk sorgular): her eslesen kayit -8
-8. Index fragmentation: her eslesen index -10
-9. Sysadmin sayisi esik ustu: -10
+8. Index fragmentation/bloat: her eslesen kayit -10
+9. Yetkili hesap sayisi esik ustu: -10
 10. Failed login sayisi esik ustu: -15
-11. Basarisiz SQL Agent jobs: her kayit -15
-12. Auto growth hatali ayar: her dosya -10
-13. Log dosyasi doluluk kritige ulasirsa: DB basina -30
+11. Basarisiz job kayitlari: her kayit -15
+12. Auto growth hatali ayar (MSSQL): her dosya -10
+13. Log/WAL doluluk kritige ulasirsa: DB basina -30
 
 Notlar:
-- Backup kontrolu D ve I tiplerini kabul eder.
 - DB filtreleme mekanizmasi MonitoringConfig ile calisir.
 - Sistem DB dahil etme davranisi bazi kontrollerde env flag ile yonetilir.
+- PostgreSQL backup kontrolu once `BACKUP_DIR` dosya/icerik eslesmesi, sonra `pg_stat_archiver` sinyalini kullanir.
 
-## 5. API Endpointleri (app.py)
+## 5. PostgreSQL'e Ozel Uygulamalar
+- Backup kontrolu: `BACKUP_DIR` dosya adi + SQL dump icerigi + WAL archive sinyali.
+- Disk metrik fallback: host yolu erisilemezse Docker icinde `df -P` ile olcum (`POSTGRES_DOCKER_CONTAINER`).
+- Memory pressure: cache hit ratio heuristigi.
+- Log space: `pg_ls_waldir()` / `max_wal_size`.
+- Failed login: log dosyasi, olmazsa Docker logs fallback.
+- Job izleme: pg_cron (primary), pgAgent (fallback).
+
+## 6. Query Analizi Son Durum
+Son iyilestirmeler:
+1. Izleme/stress kaynakli sorgular filtreleniyor.
+2. Alarm kosulu tek metrikten birlesik esige cevildi.
+3. Her query sonucuna kimlik eklendi (`QID`).
+
+Detaylar:
+- Gurultu filtreleri: `QUERY_NOISE_PATTERNS`.
+- Birlesik esik: `QUERY_MIN_CALLS`, `QUERY_AVG_SEC`, `QUERY_TOTAL_SEC`, `LARGE_QUERY_LOGICAL_READS`.
+- Kimlik alani:
+  - MSSQL: `query_hash` (hex)
+  - PostgreSQL: `queryid`
+  - Fallback: SQL metninden fingerprint
+
+## 7. API Endpointleri (app.py)
 - GET /
   Dashboard sayfasi.
 
@@ -83,7 +112,7 @@ Notlar:
   Esik ve ayarlari okur/gunceller.
 
 - GET/POST /api/monitoring-databases
-  Izlenecek DB secimlerini yonetir.
+  Izlenecek DB secimlerini yonetir (aktif motora gore canli liste).
 
 - POST /api/run-check
   Test.py kontrolunu arka planda tetikler.
@@ -97,7 +126,7 @@ Notlar:
 - GET /api/wait-analysis
   Wait tipi dagilimlari, trend ve blocking ozetini dondurur.
 
-## 6. Telegram Komutlari (telegram_listener.py)
+## 8. Telegram Komutlari (telegram_listener.py)
 Temel komutlar:
 - /help
 - /listdb
@@ -109,13 +138,15 @@ Temel komutlar:
 - /check
 
 Guvenlik:
-- TELEGRAM_CHAT_IDS whitelist zorunlu.
-- master, model, msdb, tempdb korumasi var.
+- `TELEGRAM_CHAT_IDS` whitelist zorunlu.
+- Sistem DB korumasi var (ozellikle MSSQL sistem DB'leri).
 - DB adi icin basit injection filtresi var.
 
-## 7. .env Degiskenleri (Onemli Olanlar)
+## 9. .env Degiskenleri (Onemli Olanlar)
 Baglanti:
+- DB_ENGINE (mssql|postgresql)
 - DB_SERVER
+- DB_PORT
 - DB_NAME
 - DB_USER
 - DB_PASSWORD
@@ -132,6 +163,10 @@ Alarm ve esikler:
 - SYSADMIN_MAX_COUNT
 - LONG_QUERY_SEC
 - LARGE_QUERY_LOGICAL_READS
+- QUERY_ANALYSIS_TOP_N
+- QUERY_MIN_CALLS
+- QUERY_AVG_SEC
+- QUERY_TOTAL_SEC
 - INDEX_FRAGMENTATION_PCT
 - INDEX_FRAGMENTATION_MIN_PAGES
 
@@ -139,6 +174,9 @@ Davranis flagleri:
 - CHECK_SYSTEM_DB_BACKUP
 - CHECK_SYSTEM_DB_AUTOGROWTH
 - CHECK_SYSTEM_DB_INDEX
+
+PostgreSQL container fallback:
+- POSTGRES_DOCKER_CONTAINER
 
 Telegram:
 - TELEGRAM_TOKEN
@@ -151,42 +189,39 @@ Flask:
 - FLASK_PORT
 - FLASK_COOKIE_SECURE
 
-## 8. UI/Frontend Durumu
-- Tek sayfa dashboard templates/index.html dosyasinda.
-- Chart.js ile trend grafikler var.
-- Tema secimi, ayar paneli, tablo filtreleme, csv export var.
-- Oto yenileme ve manuel run-check tetikleme var.
+## 10. Bilinen Riskler / Dikkat Noktalari
+1. Docker log tabanli failed-login sayisi stress test sonrasi sisik kalabilir.
+2. Disk metrikleri host-container topolojisine bagimli; fallback olmasa None gelebilir.
+3. Telegram mesajlari parse_mode=HTML kullaniyor; dinamik metinler escape edilmezse parse hatasi riski olur.
+4. SQLite tablo/kolon adlari migration olmadan degistirilmemeli.
 
-## 9. Bilinen Riskler / Dikkat Noktalari
-1. Mimari su an MSSQL'e sikica bagli.
-2. Telegram mesajlari parse_mode=HTML kullaniyor; dinamik metinler escape edilmezse parse hatasi riski olur.
-3. Backup path davranisi ortama gore degisebilir (SQL Server servis hesabi izinleri kritik).
-4. app.py ve Test.py arasinda moduller arasi paylasilan durum kullaniliyor.
+## 11. Son Donem Davranis Degisiklikleri
+- Adapter/strategy yapisi ile Postgres destegi genisletildi.
+- app.py canli DB listesini motora gore cekiyor ve stale MonitoringConfig kayitlarini pasifliyor.
+- Postgres backup kontrolu file+content+archive sinyali ile iyilestirildi.
+- Postgres disk metriğine Docker fallback eklendi.
+- Failed login icin Docker logs fallback eklendi.
+- pg_cron/pgAgent job kontrolleri eklendi.
+- Query analizinde noise filtre + birlesik esik + QID kimligi eklendi.
 
-## 10. Son Donem Davranis Degisiklikleri
-- Index fragmentation kontrolu eklendi.
-- Log-space ve disk metriklerinde None durumlari icin korumalar eklendi.
-- Telegram penalty satirlarinda okunabilirlik ve guvenli format iyilestirmeleri yapildi.
-- /takebackup komutu full/diff secenekli hale getirildi.
-
-## 11. Calistirma Komutlari
+## 12. Calistirma Komutlari
 - python app.py
 - python Test.py
 - python telegram_listener.py
 - python stress_test.py (yalniz test ortami)
 
-## 12. Kisa Devralma Plani (Baska AI icin)
-1. Once app.py endpoint sozlesmesini incele, bozma.
-2. Sonra Test.py skor sirasini koruyarak degisiklik yap.
-3. Telegram tarafinda whitelist + sistem DB korumasini asla gevsetme.
-4. SQLite tablo/kolon isimlerini migration olmadan degistirme.
-5. Yeni ozellik eklerken once API/DB uyumunu, sonra UI entegrasyonunu yap.
+## 13. Kisa Devralma Plani (Baska AI icin)
+1. Once `db_adapters.py` + `health_strategies.py` sozlesmesini incele, motor davranisini bozma.
+2. Test.py skor sirasini koruyarak degisiklik yap.
+3. app.py endpoint sozlesmesini bozma (ozellikle `/api/monitoring-databases` akisi).
+4. Telegram tarafinda whitelist + sistem DB korumasini asla gevsetme.
+5. SQLite tablo/kolon isimlerini migration olmadan degistirme.
 
-## 13. Gelecek Icin Dogal Adimlar
-- Motor bagimsiz adapter mimarisi (MSSQL -> PostgreSQL/MySQL)
-- Profile-based coklu sunucu izleme
-- Role-based access control
-- Alarm runbook/ack mekanizmasi
-- Test coverage arttirma
+## 14. Gelecek Icin Dogal Adimlar
+- Query QID bilgisini dashboard/API'ye acik alan olarak tasimak.
+- Blocking analizine wait event/type ve blocker query ozeti eklemek.
+- Alarm ack/runbook mekanizmasi eklemek.
+- Coklu sunucu/profil bazli izleme.
+- Test coverage arttirma.
 
 Bu dosya, repo anlik durumunu teknik devralma odakli ozetler.

@@ -173,6 +173,78 @@ def _count_auth_failures_from_docker_logs(container_name: str, window_hours: int
     return count
 
 
+def _get_free_pct_from_docker_path(container_name: str, path: str) -> float | None:
+    if not container_name or not path:
+        return None
+
+    try:
+        result = subprocess.run(
+            ["docker", "exec", container_name, "df", "-P", path],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+
+    data_row = re.split(r"\s+", lines[-1])
+    if len(data_row) < 6:
+        return None
+
+    try:
+        total_kb = float(data_row[1])
+        avail_kb = float(data_row[3])
+    except (TypeError, ValueError):
+        return None
+
+    if total_kb <= 0:
+        return None
+
+    return (avail_kb / total_kb) * 100.0
+
+
+def _get_postgres_storage_paths(cursor) -> list[str]:
+    """Return unique PostgreSQL storage roots from data_directory and tablespaces."""
+    candidate_paths: list[str] = []
+
+    try:
+        cursor.execute("SELECT setting FROM pg_settings WHERE name = 'data_directory'")
+        row = cursor.fetchone()
+        if row and row[0]:
+            candidate_paths.append(str(row[0]))
+    except Exception:
+        pass
+
+    try:
+        cursor.execute("SELECT pg_tablespace_location(oid) FROM pg_tablespace")
+        for row in cursor.fetchall():
+            location = str(row[0] or "").strip()
+            if location:
+                candidate_paths.append(location)
+    except Exception:
+        pass
+
+    unique_paths: list[str] = []
+    seen: set[str] = set()
+    for path in candidate_paths:
+        normalized = os.path.normpath(path)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_paths.append(normalized)
+    return unique_paths
+
+
 def _find_recent_backed_up_databases(
     db_names: list[str],
     backup_dir: str,
@@ -238,6 +310,60 @@ def _find_recent_backed_up_databases(
     return matched
 
 
+def _probe_postgres_db_connectivity(db_names: list[str]) -> list[tuple[str, str]]:
+    """Return (db_name, state_desc) for DBs that cannot be reached via direct connect."""
+    if not db_names:
+        return []
+
+    db_server = (os.getenv("DB_SERVER") or "").strip()
+    db_user = (os.getenv("DB_USER") or "").strip()
+    db_password = os.getenv("DB_PASSWORD") or ""
+    db_port = (os.getenv("DB_PORT") or "5432").strip()
+
+    if not db_server or not db_user:
+        return []
+
+    probe_timeout = max(1, int(os.getenv("POSTGRES_OFFLINE_PROBE_TIMEOUT_SEC", "3")))
+
+    try:
+        import psycopg2
+    except Exception:
+        return []
+
+    unreachable: list[tuple[str, str]] = []
+    for db_name in db_names:
+        try:
+            conn = psycopg2.connect(
+                host=db_server,
+                port=db_port,
+                dbname=db_name,
+                user=db_user,
+                password=db_password,
+                connect_timeout=probe_timeout,
+            )
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            finally:
+                conn.close()
+        except Exception as exc:
+            err = str(exc).strip().splitlines()[0] if str(exc).strip() else "connection failed"
+            err_lower = err.lower()
+
+            if "is not currently accepting connections" in err_lower:
+                state_desc = "OFFLINE"
+            elif "permission denied for database" in err_lower:
+                state_desc = "CONNECT PRIVILEGE DENIED"
+            else:
+                short_err = err[:120]
+                state_desc = f"UNREACHABLE: {short_err}"
+
+            unreachable.append((str(db_name), state_desc))
+
+    return unreachable
+
+
 class HealthCheckStrategy(ABC):
     """Abstract query strategy used by the monitoring loop."""
 
@@ -287,7 +413,10 @@ class HealthCheckStrategy(ABC):
 
         Expected keys per row:
         - db_name: str
+        - query_id: str
         - max_elapsed_sec: float
+        - avg_elapsed_sec: float
+        - total_elapsed_sec: float
         - avg_logical_reads: float
         - execution_count: int
         - query_text: str
@@ -410,8 +539,11 @@ class MSSQLHealthStrategy(HealthCheckStrategy):
         SELECT TOP ({top_n})
             COALESCE(DB_NAME(st.dbid), DB_NAME(pa.plan_dbid), 'unknown') AS db_name,
             (CAST(qs.max_elapsed_time AS FLOAT) / 1000000.0) AS max_elapsed_sec,
+            (CAST(qs.total_elapsed_time AS FLOAT) / 1000000.0) AS total_elapsed_sec,
+            (CAST(qs.total_elapsed_time AS FLOAT) / 1000000.0) / NULLIF(qs.execution_count, 0) AS avg_elapsed_sec,
             (CAST(qs.total_logical_reads AS FLOAT) / NULLIF(qs.execution_count, 0)) AS avg_logical_reads,
             qs.execution_count,
+            sys.fn_varbintohexstr(qs.query_hash) AS query_id,
             qs.last_execution_time,
             SUBSTRING(
                 st.text,
@@ -438,11 +570,14 @@ class MSSQLHealthStrategy(HealthCheckStrategy):
 
         cursor.execute(query_stats_sql)
         rows = []
-        for db_name, max_sec, avg_reads, execution_count, _last_exec, query_text in cursor.fetchall():
+        for db_name, max_sec, total_sec, avg_sec, avg_reads, execution_count, query_id, _last_exec, query_text in cursor.fetchall():
             rows.append(
                 {
                     "db_name": db_name or "unknown",
+                    "query_id": str(query_id or ""),
                     "max_elapsed_sec": float(max_sec or 0),
+                    "avg_elapsed_sec": float(avg_sec or 0),
+                    "total_elapsed_sec": float(total_sec or 0),
                     "avg_logical_reads": float(avg_reads or 0),
                     "execution_count": int(execution_count or 0),
                     "query_text": query_text or "",
@@ -597,14 +732,57 @@ class PostgresHealthStrategy(HealthCheckStrategy):
     def get_offline_databases(self, cursor) -> list[tuple[str, str]]:
         cursor.execute(
             """
-            SELECT datname,
-                   CASE WHEN datallowconn THEN 'ONLINE' ELSE 'OFFLINE' END AS state_desc
+            SELECT
+                   datname,
+                   datallowconn,
+                   datconnlimit,
+                   has_database_privilege(current_user, datname, 'CONNECT') AS can_connect,
+                   CASE
+                       WHEN NOT datallowconn THEN 'OFFLINE'
+                       WHEN datconnlimit = 0 THEN 'CONNECTION LIMIT 0'
+                       WHEN NOT has_database_privilege(current_user, datname, 'CONNECT') THEN 'CONNECT PRIVILEGE DENIED'
+                   END AS state_desc
             FROM pg_database
-            WHERE NOT datallowconn
+            WHERE (
+                    NOT datallowconn
+                    OR datconnlimit = 0
+                    OR NOT has_database_privilege(current_user, datname, 'CONNECT')
+                  )
               AND NOT datistemplate
             """
         )
-        return [(str(name), str(state)) for name, state in cursor.fetchall()]
+
+        rows_out: list[tuple[str, str]] = []
+        db_names_for_probe: list[str] = []
+
+        for datname, datallowconn, datconnlimit, can_connect, state_desc in cursor.fetchall():
+            db_name = str(datname)
+            state = str(state_desc or "UNKNOWN")
+
+            # If connection is disabled and user also lacks connect privilege,
+            # keep the strongest infrastructure-level reason first.
+            if not bool(datallowconn):
+                state = "OFFLINE"
+            elif int(datconnlimit or 0) == 0:
+                state = "CONNECTION LIMIT 0"
+            elif not bool(can_connect):
+                state = "CONNECT PRIVILEGE DENIED"
+            else:
+                db_names_for_probe.append(db_name)
+                continue
+
+            rows_out.append((db_name, state))
+
+        # Fallback: probe direct connect per DB to catch runtime-inaccessible states.
+        # This is useful when catalog flags are not sufficient in managed/container setups.
+        probed_unreachable = _probe_postgres_db_connectivity(db_names_for_probe)
+        if probed_unreachable:
+            existing = {name.lower() for name, _state in rows_out}
+            for name, state in probed_unreachable:
+                if name.lower() not in existing:
+                    rows_out.append((name, state))
+
+        return rows_out
 
     def get_missing_backups(
         self,
@@ -675,24 +853,7 @@ class PostgresHealthStrategy(HealthCheckStrategy):
         return candidate_dbs
 
     def get_disk_usage(self, cursor) -> list[dict[str, object]] | None:
-        candidate_paths: list[str] = []
-
-        try:
-            cursor.execute("SELECT setting FROM pg_settings WHERE name = 'data_directory'")
-            row = cursor.fetchone()
-            if row and row[0]:
-                candidate_paths.append(str(row[0]))
-        except Exception:
-            pass
-
-        try:
-            cursor.execute("SELECT pg_tablespace_location(oid) FROM pg_tablespace")
-            for row in cursor.fetchall():
-                location = str(row[0] or "").strip()
-                if location:
-                    candidate_paths.append(location)
-        except Exception:
-            pass
+        candidate_paths = _get_postgres_storage_paths(cursor)
 
         if not candidate_paths:
             return None
@@ -718,6 +879,18 @@ class PostgresHealthStrategy(HealthCheckStrategy):
 
         if rows:
             return rows
+
+        docker_container = (os.getenv("POSTGRES_DOCKER_CONTAINER") or "").strip()
+        if docker_container:
+            docker_rows: list[dict[str, object]] = []
+            for path in candidate_paths:
+                free_pct = _get_free_pct_from_docker_path(docker_container, path)
+                if free_pct is None:
+                    continue
+                docker_rows.append({"drive": f"{docker_container}:{path}", "free_pct": free_pct})
+
+            if docker_rows:
+                return docker_rows
 
         # DB may run on a different host/container so local filesystem lookup can fail.
         # Return a soft row so monitor output indicates limited visibility instead of unsupported.
@@ -780,11 +953,14 @@ class PostgresHealthStrategy(HealthCheckStrategy):
                 SELECT
                     COALESCE(d.datname, current_database()) AS db_name,
                     COALESCE(s.max_exec_time, 0) / 1000.0 AS max_elapsed_sec,
+                    COALESCE(s.mean_exec_time, 0) / 1000.0 AS avg_elapsed_sec,
+                    COALESCE(s.total_exec_time, 0) / 1000.0 AS total_elapsed_sec,
                     CASE
                         WHEN s.calls > 0 THEN (COALESCE(s.shared_blks_hit, 0) + COALESCE(s.shared_blks_read, 0))::FLOAT / s.calls
                         ELSE 0
                     END AS avg_logical_reads,
                     COALESCE(s.calls, 0) AS execution_count,
+                    COALESCE(s.queryid::text, '') AS query_id,
                     s.query AS query_text
                 FROM pg_stat_statements s
                 LEFT JOIN pg_database d ON d.oid = s.dbid
@@ -795,11 +971,14 @@ class PostgresHealthStrategy(HealthCheckStrategy):
             )
 
             rows = []
-            for db_name, max_elapsed_sec, avg_logical_reads, execution_count, query_text in cursor.fetchall():
+            for db_name, max_elapsed_sec, avg_elapsed_sec, total_elapsed_sec, avg_logical_reads, execution_count, query_id, query_text in cursor.fetchall():
                 rows.append(
                     {
                         "db_name": db_name or "unknown",
+                        "query_id": str(query_id or ""),
                         "max_elapsed_sec": float(max_elapsed_sec or 0),
+                        "avg_elapsed_sec": float(avg_elapsed_sec or 0),
+                        "total_elapsed_sec": float(total_elapsed_sec or 0),
                         "avg_logical_reads": float(avg_logical_reads or 0),
                         "execution_count": int(execution_count or 0),
                         "query_text": query_text or "",
@@ -813,8 +992,11 @@ class PostgresHealthStrategy(HealthCheckStrategy):
                 SELECT
                     current_database() AS db_name,
                     EXTRACT(EPOCH FROM (clock_timestamp() - COALESCE(query_start, xact_start, backend_start))) AS max_elapsed_sec,
+                    EXTRACT(EPOCH FROM (clock_timestamp() - COALESCE(query_start, xact_start, backend_start))) AS avg_elapsed_sec,
+                    EXTRACT(EPOCH FROM (clock_timestamp() - COALESCE(query_start, xact_start, backend_start))) AS total_elapsed_sec,
                     0::FLOAT AS avg_logical_reads,
                     1 AS execution_count,
+                                        SUBSTRING(md5(COALESCE(query, '')), 1, 16) AS query_id,
                     query AS query_text
                 FROM pg_stat_activity
                 WHERE state <> 'idle'
@@ -826,11 +1008,14 @@ class PostgresHealthStrategy(HealthCheckStrategy):
             )
 
             rows = []
-            for db_name, max_elapsed_sec, avg_logical_reads, execution_count, query_text in cursor.fetchall():
+            for db_name, max_elapsed_sec, avg_elapsed_sec, total_elapsed_sec, avg_logical_reads, execution_count, query_id, query_text in cursor.fetchall():
                 rows.append(
                     {
                         "db_name": db_name or "unknown",
+                        "query_id": str(query_id or ""),
                         "max_elapsed_sec": float(max_elapsed_sec or 0),
+                        "avg_elapsed_sec": float(avg_elapsed_sec or 0),
+                        "total_elapsed_sec": float(total_elapsed_sec or 0),
                         "avg_logical_reads": float(avg_logical_reads or 0),
                         "execution_count": int(execution_count or 0),
                         "query_text": query_text or "",
@@ -936,43 +1121,65 @@ class PostgresHealthStrategy(HealthCheckStrategy):
         except Exception:
             return None
 
-        if not row or not row[0]:
-            # pg_cron kurulu degilse job kontrolu bu motor icin desteklenmez.
-            return None
-
-        schema_name = str(row[0])
-        if not _is_safe_sql_identifier(schema_name):
-            return None
-
-        schema_quoted = _quote_pg_identifier(schema_name)
-        query = f"""
-        SELECT
-            d.jobid,
-            COALESCE(d.command, j.command, '') AS command_text,
-            COALESCE(d.status, 'unknown') AS run_status
-        FROM {schema_quoted}.job_run_details d
-        LEFT JOIN {schema_quoted}.job j ON j.jobid = d.jobid
-        WHERE COALESCE(d.end_time, d.start_time) >= (clock_timestamp() - INTERVAL '24 hours')
-          AND LOWER(COALESCE(d.status, '')) NOT IN ('succeeded', 'success')
-        ORDER BY COALESCE(d.end_time, d.start_time) DESC
-        LIMIT 100
-        """
-
-        try:
-            cursor.execute(query)
-            rows = cursor.fetchall()
-        except Exception:
-            rows = []
-
         failed_jobs: list[str] = []
-        for jobid, command_text, run_status in rows:
-            status_text = str(run_status or "unknown")
-            command_short = str(command_text or "").strip().replace("\n", " ")
-            if len(command_short) > 80:
-                command_short = command_short[:77] + "..."
-            failed_jobs.append(f"pg_cron job #{jobid} status={status_text} command='{command_short}'")
+        has_pg_cron = bool(row and row[0])
 
-        if failed_jobs:
+        if has_pg_cron:
+            raw_schema = str(row[0])
+            candidate_schemas = []
+            for candidate in ("cron", raw_schema):
+                if candidate and candidate not in candidate_schemas:
+                    candidate_schemas.append(candidate)
+
+            schema_name = None
+            for candidate in candidate_schemas:
+                if not _is_safe_sql_identifier(candidate):
+                    continue
+                try:
+                    cursor.execute(
+                        "SELECT to_regclass(%s), to_regclass(%s)",
+                        (f"{candidate}.job_run_details", f"{candidate}.job"),
+                    )
+                    reg_rows = cursor.fetchone()
+                except Exception:
+                    continue
+
+                has_run_details = bool(reg_rows and reg_rows[0])
+                has_job_table = bool(reg_rows and reg_rows[1])
+                if has_run_details and has_job_table:
+                    schema_name = candidate
+                    break
+
+            if not schema_name:
+                return None
+
+            schema_quoted = _quote_pg_identifier(schema_name)
+            query = f"""
+            SELECT
+                d.jobid,
+                COALESCE(d.command, j.command, '') AS command_text,
+                COALESCE(d.status, 'unknown') AS run_status
+            FROM {schema_quoted}.job_run_details d
+            LEFT JOIN {schema_quoted}.job j ON j.jobid = d.jobid
+            WHERE COALESCE(d.end_time, d.start_time) >= (clock_timestamp() - INTERVAL '24 hours')
+              AND LOWER(COALESCE(d.status, '')) NOT IN ('succeeded', 'success')
+            ORDER BY COALESCE(d.end_time, d.start_time) DESC
+            LIMIT 100
+            """
+
+            try:
+                cursor.execute(query)
+                rows = cursor.fetchall()
+            except Exception:
+                return None
+
+            for jobid, command_text, run_status in rows:
+                status_text = str(run_status or "unknown")
+                command_short = str(command_text or "").strip().replace("\n", " ")
+                if len(command_short) > 80:
+                    command_short = command_short[:77] + "..."
+                failed_jobs.append(f"pg_cron job #{jobid} status={status_text} command='{command_short}'")
+
             return failed_jobs
 
         # pgAgent fallback (if installed).
@@ -1016,7 +1223,61 @@ class PostgresHealthStrategy(HealthCheckStrategy):
         return failed_jobs
 
     def get_auto_growth_files(self, cursor) -> list[dict[str, object]] | None:
-        return None
+        candidate_paths = _get_postgres_storage_paths(cursor)
+        if not candidate_paths:
+            return None
+
+        min_free_pct = float(os.getenv("AUTOGROWTH_MIN_FREE_PCT", "15"))
+        rows: list[dict[str, object]] = []
+        seen_devices: set[int] = set()
+
+        for path in candidate_paths:
+            try:
+                stat_info = os.stat(path)
+            except OSError:
+                continue
+
+            if stat_info.st_dev in seen_devices:
+                continue
+            seen_devices.add(stat_info.st_dev)
+
+            try:
+                usage = shutil.disk_usage(path)
+            except OSError:
+                continue
+
+            if usage.total <= 0:
+                continue
+
+            free_pct = (float(usage.free) / float(usage.total)) * 100.0
+            if free_pct < min_free_pct:
+                rows.append(
+                    {
+                        "db_name": None,
+                        "file_name": path,
+                        "issue_desc": f"cluster depolama buyume alani dusuk (bos alan=%{free_pct:.2f}, esik=%{min_free_pct:.1f})",
+                    }
+                )
+
+        if rows:
+            return rows
+
+        docker_container = (os.getenv("POSTGRES_DOCKER_CONTAINER") or "").strip()
+        if docker_container:
+            for path in candidate_paths:
+                free_pct = _get_free_pct_from_docker_path(docker_container, path)
+                if free_pct is None:
+                    continue
+                if free_pct < min_free_pct:
+                    rows.append(
+                        {
+                            "db_name": None,
+                            "file_name": f"{docker_container}:{path}",
+                            "issue_desc": f"container depolama buyume alani dusuk (bos alan=%{free_pct:.2f}, esik=%{min_free_pct:.1f})",
+                        }
+                    )
+
+        return rows
 
     def get_log_space_usage(self, cursor) -> list[dict[str, object]] | None:
         try:

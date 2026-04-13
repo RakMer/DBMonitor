@@ -10,3 +10,4 @@
 ---✅ Yedekleme işlemini full ve diferansiyel olarak iki seçenekte yap.
 ---✅ İndex fragmentation sağlık kontrolün.
 ---   Başka veritabanı motorları için de çalışır hale getir.
+---   Arayüzden çoklu sunucu desteği ekleme. Sunucu bilgilerini arayüzden kontrol etme.

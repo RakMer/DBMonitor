@@ -240,14 +240,17 @@ def get_live_database_names() -> list[str]:
         cursor = conn.cursor()
 
         if isinstance(adapter, MSSQLAdapter):
-            cursor.execute("SELECT name FROM sys.databases WHERE state_desc = 'ONLINE' ORDER BY name")
+            # Include ALL states (ONLINE, OFFLINE, RESTORING, …) so that offline
+            # databases are never dropped from MonitoringConfig when settings are saved.
+            cursor.execute("SELECT name FROM sys.databases ORDER BY name")
         elif isinstance(adapter, PostgresAdapter):
+            # Include offline databases (datallowconn=false / datconnlimit=0) so they
+            # remain in MonitoringConfig and are not silently filtered during health checks.
             cursor.execute(
                 """
                 SELECT datname
                 FROM pg_database
-                WHERE datallowconn = TRUE
-                  AND NOT datistemplate
+                WHERE NOT datistemplate
                 ORDER BY datname
                 """
             )

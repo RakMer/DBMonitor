@@ -4,6 +4,7 @@ import requests
 import app
 import re
 import html
+import hashlib
 from datetime import datetime
 import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
@@ -41,7 +42,31 @@ SYSADMIN_MAX_COUNT     = int(os.getenv('SYSADMIN_MAX_COUNT', 2))
 LONG_QUERY_SEC         = float(os.getenv('LONG_QUERY_SEC', 30))
 LARGE_QUERY_LOGICAL_READS = int(os.getenv('LARGE_QUERY_LOGICAL_READS', 1000000))
 QUERY_ANALYSIS_TOP_N   = int(os.getenv('QUERY_ANALYSIS_TOP_N', 5))
+QUERY_MIN_CALLS        = int(os.getenv('QUERY_MIN_CALLS', 2))
+QUERY_AVG_SEC          = float(os.getenv('QUERY_AVG_SEC', LONG_QUERY_SEC))
+QUERY_TOTAL_SEC        = float(os.getenv('QUERY_TOTAL_SEC', max(LONG_QUERY_SEC * QUERY_MIN_CALLS, LONG_QUERY_SEC)))
 SYSTEM_DATABASES       = {name.lower() for name in db_adapter.get_system_databases()}
+
+QUERY_NOISE_PATTERNS = (
+    "dbmonitor_stress_table",
+    "from pg_stat_statements",
+    "from pg_stat_activity",
+    "from pg_stat_database",
+    "from pg_settings",
+    "from pg_database",
+    "from pg_ls_waldir",
+    "from cron.job_run_details",
+    "from pgagent.pga_joblog",
+    "from sys.dm_exec_query_stats",
+    "from sys.dm_exec_sql_text",
+    "from sys.dm_exec_requests",
+    "from sys.dm_db_index_physical_stats",
+    "from sys.master_files",
+    "from sys.databases",
+    "dbcc sqlperf",
+    "waitfor delay",
+    "pg_sleep(",
+)
 
 
 def parse_bool_env(name: str, default: bool) -> bool:
@@ -61,6 +86,25 @@ def sanitize_sql_text(text: str | None, max_len: int = 140) -> str:
         return ""
     normalized = " ".join(text.split())
     return normalized[:max_len] + ("..." if len(normalized) > max_len else "")
+
+
+def is_monitor_or_stress_query(sql_text: str | None) -> bool:
+    normalized = " ".join(str(sql_text or "").lower().split())
+    if not normalized:
+        return False
+    return any(pattern in normalized for pattern in QUERY_NOISE_PATTERNS)
+
+
+def get_query_identity(query_row: dict[str, object]) -> str:
+    query_id = str(query_row.get("query_id") or "").strip()
+    if query_id:
+        return query_id
+
+    sql_text = str(query_row.get("query_text") or "")
+    normalized = " ".join(sql_text.lower().split())
+    if not normalized:
+        return "unknown"
+    return "fp:" + hashlib.sha1(normalized.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
 
 def truncate_label(value: str, max_len: int = 42) -> str:
@@ -726,15 +770,23 @@ def run_health_check_with_score():
             offline_dbs = []
             print(f"⚠️ OFFLINE DB: Durumlar alinamadi: {e}")
 
+        # Offline DB durumu altyapi riski oldugu icin MonitoringConfig filtresinden bagimsiz izlenir.
         filtered_offline_dbs = [db for db in offline_dbs if is_database_monitored(db[0], monitored_databases)]
+        effective_offline_dbs = offline_dbs
 
-        if not filtered_offline_dbs:
+        if not effective_offline_dbs:
             print("🟢 Tüm Veritabanları ONLINE durumda.")
         else:
-            for db in filtered_offline_dbs:
+            for db in effective_offline_dbs:
                 health_score -= 20
                 penalties.append(f"[-20] {db[0]} veritabanı {db[1]} durumunda!")
                 print(f"🔴 Sorunlu Veritabanı: {db[0]} ({db[1]})")
+
+            ignored_by_monitoring = max(0, len(effective_offline_dbs) - len(filtered_offline_dbs))
+            if monitored_databases is not None and ignored_by_monitoring > 0:
+                print(
+                    f"ℹ️ OFFLINE DB: {ignored_by_monitoring} DB MonitoringConfig disinda olsa da offline oldugu icin skora dahil edildi."
+                )
 
         # 3. Yedekleme Kontrolü
         backup_excluded_dbs = {'tempdb'}
@@ -835,29 +887,53 @@ def run_health_check_with_score():
             heavy_queries = health_strategy.get_heavy_queries(cursor, top_n)
 
             matched_queries = []
+            filtered_noise_count = 0
             for q in heavy_queries:
                 q_max_sec = float(q.get("max_elapsed_sec") or 0)
+                q_avg_sec = float(q.get("avg_elapsed_sec") or 0)
+                q_total_sec = float(q.get("total_elapsed_sec") or 0)
                 q_avg_reads = float(q.get("avg_logical_reads") or 0)
+                q_exec_count = int(q.get("execution_count") or 0)
                 q_db_name = str(q.get("db_name") or "unknown")
+                q_text = str(q.get("query_text") or "")
+
+                if is_monitor_or_stress_query(q_text):
+                    filtered_noise_count += 1
+                    continue
 
                 if not is_database_monitored(q_db_name, monitored_databases):
                     continue
 
-                if q_max_sec >= LONG_QUERY_SEC or q_avg_reads >= LARGE_QUERY_LOGICAL_READS:
+                if q_avg_sec <= 0 and q_total_sec > 0 and q_exec_count > 0:
+                    q_avg_sec = q_total_sec / q_exec_count
+
+                has_enough_calls = q_exec_count >= QUERY_MIN_CALLS
+                is_slow_query = has_enough_calls and q_avg_sec >= QUERY_AVG_SEC and q_total_sec >= QUERY_TOTAL_SEC
+                is_large_query = has_enough_calls and q_avg_reads >= LARGE_QUERY_LOGICAL_READS
+
+                if is_slow_query or is_large_query:
+                    q["avg_elapsed_sec"] = q_avg_sec
+                    q["total_elapsed_sec"] = q_total_sec
                     matched_queries.append(q)
+
+            if filtered_noise_count > 0:
+                print(f"ℹ️ QUERY STATS: {filtered_noise_count} adet izleme/stress kaynakli sorgu filtrelendi.")
 
             if matched_queries:
                 print(f"🔴 QUERY STATS: {len(matched_queries)} adet uzun/büyük sorgu tespit edildi.")
                 for q in matched_queries:
                     q_db_name = str(q.get("db_name") or "unknown")
+                    q_identity = get_query_identity(q)
                     q_max_sec = float(q.get("max_elapsed_sec") or 0)
+                    q_avg_sec = float(q.get("avg_elapsed_sec") or 0)
+                    q_total_sec = float(q.get("total_elapsed_sec") or 0)
                     q_avg_reads = int(float(q.get("avg_logical_reads") or 0))
                     q_exec_count = int(q.get("execution_count") or 0)
                     q_snippet = sanitize_sql_text(str(q.get("query_text") or ""))
 
                     health_score -= 8
                     penalties.append(
-                        f"[-8] Uzun/Büyük Sorgu: DB={q_db_name}, Max={q_max_sec:.1f}s, AvgReads={q_avg_reads}, Exec={q_exec_count}, SQL='{q_snippet}'"
+                        f"[-8] Uzun/Büyük Sorgu: DB={q_db_name}, QID={q_identity}, Max={q_max_sec:.1f}s, AvgSec={q_avg_sec:.1f}s, TotalSec={q_total_sec:.1f}s, AvgReads={q_avg_reads}, Exec={q_exec_count}, SQL='{q_snippet}'"
                     )
             else:
                 print("🟢 QUERY STATS: Uzun süre çalışan veya büyük sorgu bulunamadı.")
@@ -940,14 +1016,24 @@ def run_health_check_with_score():
             for f in growth_files:
                 db_name = f.get("db_name")
                 file_name = f.get("file_name")
+                issue_desc = str(f.get("issue_desc") or "").strip()
                 is_pct = int(f.get("is_percent_growth") or 0)
                 growth_pages = int(f.get("growth_pages") or 0)
 
-                if not is_database_monitored(db_name, monitored_databases):
+                is_cluster_level_issue = bool(issue_desc) and not db_name
+
+                if not is_cluster_level_issue and not is_database_monitored(db_name, monitored_databases):
                     continue
 
                 if (not CHECK_SYSTEM_DB_AUTOGROWTH) and db_name and str(db_name).lower() in SYSTEM_DATABASES:
                     skipped_system_growth += 1
+                    continue
+
+                if issue_desc:
+                    target_name = str(file_name or db_name or "unknown")
+                    health_score -= 10
+                    penalties.append(f"[-10] Auto Growth: {target_name} icin {issue_desc}.")
+                    bad_growth_count += 1
                     continue
 
                 if is_pct == 1 and growth_pages > 0:
