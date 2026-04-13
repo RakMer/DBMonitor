@@ -643,6 +643,84 @@
     </div>
 
     <div class="mb-4">
+        <h6 class="text-secondary text-uppercase mb-2">Hedef Sunucu Secimi</h6>
+        <div class="row g-3">
+            <div class="col-12">
+                <label class="form-label text-secondary small">Aktif Motor</label>
+                <select id="set-active-db-engine" class="form-select bg-dark text-light">
+                    <option value="mssql">MSSQL</option>
+                    <option value="postgresql">PostgreSQL</option>
+                </select>
+                <small class="text-secondary">Kaydettikten sonra izleme secili motora gecis yapar.</small>
+            </div>
+        </div>
+
+        <div id="mssql-config-block" class="mt-3">
+            <div class="text-secondary small mb-2">MSSQL Profili</div>
+            <div class="row g-2">
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Server</label>
+                    <input id="set-mssql-server" type="text" class="form-control bg-dark text-light" placeholder="10.20.2.23">
+                </div>
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Port (ops.)</label>
+                    <input id="set-mssql-port" type="text" class="form-control bg-dark text-light" placeholder="1433">
+                </div>
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Database</label>
+                    <input id="set-mssql-db" type="text" class="form-control bg-dark text-light" placeholder="master">
+                </div>
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Kullanici</label>
+                    <input id="set-mssql-user" type="text" class="form-control bg-dark text-light" placeholder="sa">
+                </div>
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Sifre</label>
+                    <input id="set-mssql-password" type="password" class="form-control bg-dark text-light" placeholder="******">
+                </div>
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Driver</label>
+                    <input id="set-mssql-driver" type="text" class="form-control bg-dark text-light" placeholder="ODBC Driver 18 for SQL Server">
+                </div>
+            </div>
+        </div>
+
+        <div id="postgres-config-block" class="mt-3">
+            <div class="text-secondary small mb-2">PostgreSQL Profili</div>
+            <div class="row g-2">
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Server</label>
+                    <input id="set-pg-server" type="text" class="form-control bg-dark text-light" placeholder="127.0.0.1">
+                </div>
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Port</label>
+                    <input id="set-pg-port" type="text" class="form-control bg-dark text-light" placeholder="5432">
+                </div>
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Database</label>
+                    <input id="set-pg-db" type="text" class="form-control bg-dark text-light" placeholder="postgres">
+                </div>
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Kullanici</label>
+                    <input id="set-pg-user" type="text" class="form-control bg-dark text-light" placeholder="postgres">
+                </div>
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Sifre</label>
+                    <input id="set-pg-password" type="password" class="form-control bg-dark text-light" placeholder="******">
+                </div>
+                <div class="col-6">
+                    <label class="form-label text-secondary small">Docker Container (ops.)</label>
+                    <input id="set-pg-container" type="text" class="form-control bg-dark text-light" placeholder="myPostgres">
+                </div>
+                <div class="col-12">
+                    <label class="form-label text-secondary small">pg_dump yolu (ops.)</label>
+                    <input id="set-pg-dump-bin" type="text" class="form-control bg-dark text-light" placeholder="pg_dump">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="mb-4">
         <h6 class="text-secondary text-uppercase mb-2">Parametre Ayarları</h6>
         <div class="row g-3">
             <div class="col-6">
@@ -786,6 +864,20 @@
 
     // SETTINGS FETCH & SAVE
     const settingsMap = {
+        ACTIVE_DB_ENGINE: document.getElementById('set-active-db-engine'),
+        MSSQL_DB_SERVER: document.getElementById('set-mssql-server'),
+        MSSQL_DB_PORT: document.getElementById('set-mssql-port'),
+        MSSQL_DB_NAME: document.getElementById('set-mssql-db'),
+        MSSQL_DB_USER: document.getElementById('set-mssql-user'),
+        MSSQL_DB_PASSWORD: document.getElementById('set-mssql-password'),
+        MSSQL_DB_DRIVER: document.getElementById('set-mssql-driver'),
+        POSTGRES_DB_SERVER: document.getElementById('set-pg-server'),
+        POSTGRES_DB_PORT: document.getElementById('set-pg-port'),
+        POSTGRES_DB_NAME: document.getElementById('set-pg-db'),
+        POSTGRES_DB_USER: document.getElementById('set-pg-user'),
+        POSTGRES_DB_PASSWORD: document.getElementById('set-pg-password'),
+        POSTGRES_DOCKER_CONTAINER: document.getElementById('set-pg-container'),
+        PG_DUMP_BIN: document.getElementById('set-pg-dump-bin'),
         TELEGRAM_THRESHOLD: document.getElementById('set-telegram'),
         DISK_WARN_PCT: document.getElementById('set-disk-warn'),
         DISK_CRIT_PCT: document.getElementById('set-disk-crit'),
@@ -808,13 +900,27 @@
     const selectAllDbBtn = document.getElementById('db-select-all');
     const clearAllDbBtn = document.getElementById('db-clear-all');
     const dbSearchInput = document.getElementById('db-search');
+    const activeDbEngineInput = document.getElementById('set-active-db-engine');
+    const mssqlConfigBlock = document.getElementById('mssql-config-block');
+    const postgresConfigBlock = document.getElementById('postgres-config-block');
     let monitoringDatabases = [];
     const SYSTEM_DBS = new Set(['master', 'tempdb', 'model', 'msdb']);
+
+    function toggleDbTargetFields() {
+        const engine = activeDbEngineInput ? String(activeDbEngineInput.value || 'mssql').toLowerCase() : 'mssql';
+        if (mssqlConfigBlock) mssqlConfigBlock.style.display = engine === 'mssql' ? '' : 'none';
+        if (postgresConfigBlock) postgresConfigBlock.style.display = engine === 'postgresql' ? '' : 'none';
+    }
+
+    if (activeDbEngineInput) {
+        activeDbEngineInput.addEventListener('change', toggleDbTargetFields);
+    }
 
     function fillSettingsForm(data) {
         Object.entries(settingsMap).forEach(([key, input]) => {
             if (input && key in data) input.value = data[key];
         });
+        toggleDbTargetFields();
     }
 
     function collectPayload() {
@@ -860,7 +966,10 @@
             saveBtn.disabled = true;
             if (resetBtn) resetBtn.disabled = true;
             const payload = collectPayload();
-            await submitSettings(payload, 'Kaydedildi');
+            const ok = await submitSettings(payload, 'Kaydedildi');
+            if (ok) {
+                await loadMonitoringDatabases();
+            }
             saveBtn.disabled = false;
             if (resetBtn) resetBtn.disabled = false;
         });
@@ -903,7 +1012,7 @@
         dbMonitoringList.innerHTML = toRender.map((item, idx) => {
             const inputId = `db-monitor-${idx}`;
             const checkedAttr = item.is_monitored ? 'checked' : '';
-            const isSystem = SYSTEM_DBS.has(item.name);
+            const isSystem = Boolean(item.is_system) || SYSTEM_DBS.has(item.name);
             const labelClass = isSystem ? 'form-check-label text-muted' : 'form-check-label';
             const labelStyle = isSystem ? ' style="opacity: 0.65; font-style: italic;"' : '';
             return `

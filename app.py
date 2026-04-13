@@ -83,6 +83,238 @@ DEFAULT_SETTINGS = {
     "RAM_SAMPLE_INTERVAL_SEC": "0.08",
 }
 
+ENGINE_ALIASES = {
+    "mssql": "mssql",
+    "sqlserver": "mssql",
+    "sql_server": "mssql",
+    "postgres": "postgresql",
+    "postgresql": "postgresql",
+    "pgsql": "postgresql",
+}
+
+DB_TARGET_PROFILE_KEYS = (
+    "ACTIVE_DB_ENGINE",
+    "MSSQL_DB_SERVER",
+    "MSSQL_DB_PORT",
+    "MSSQL_DB_NAME",
+    "MSSQL_DB_USER",
+    "MSSQL_DB_PASSWORD",
+    "MSSQL_DB_DRIVER",
+    "POSTGRES_DB_SERVER",
+    "POSTGRES_DB_PORT",
+    "POSTGRES_DB_NAME",
+    "POSTGRES_DB_USER",
+    "POSTGRES_DB_PASSWORD",
+    "POSTGRES_DOCKER_CONTAINER",
+    "PG_DUMP_BIN",
+)
+
+
+def normalize_db_engine(value: str | None, default: str = "mssql") -> str:
+    key = str(value or "").strip().lower()
+    return ENGINE_ALIASES.get(key, default)
+
+
+def _strip_env_value(raw: str) -> str:
+    text = str(raw or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        return text[1:-1]
+    return text
+
+
+def load_legacy_engine_profiles_from_env() -> dict[str, dict[str, str]]:
+    """Parse legacy repeated DB_* blocks from .env and map them to profile keys.
+
+    This keeps backward compatibility for users who store both MSSQL and PostgreSQL
+    blocks in the same .env without explicit MSSQL_DB_* / POSTGRES_DB_* keys.
+    """
+
+    profiles: dict[str, dict[str, str]] = {
+        "mssql": {},
+        "postgresql": {},
+    }
+
+    if not os.path.exists(ENV_PATH):
+        return profiles
+
+    active_engine: str | None = None
+    try:
+        with open(ENV_PATH, "r", encoding="utf-8", errors="ignore") as env_file:
+            for raw_line in env_file:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = _strip_env_value(value)
+
+                if key == "DB_ENGINE":
+                    engine_candidate = normalize_db_engine(value, default="")
+                    active_engine = engine_candidate if engine_candidate in profiles else None
+                    continue
+
+                if active_engine == "mssql":
+                    if key == "DB_SERVER":
+                        profiles["mssql"]["MSSQL_DB_SERVER"] = value
+                    elif key == "DB_PORT":
+                        profiles["mssql"]["MSSQL_DB_PORT"] = value
+                    elif key == "DB_NAME":
+                        profiles["mssql"]["MSSQL_DB_NAME"] = value
+                    elif key == "DB_USER":
+                        profiles["mssql"]["MSSQL_DB_USER"] = value
+                    elif key == "DB_PASSWORD":
+                        profiles["mssql"]["MSSQL_DB_PASSWORD"] = value
+                    elif key == "DB_DRIVER":
+                        profiles["mssql"]["MSSQL_DB_DRIVER"] = value
+
+                if active_engine == "postgresql":
+                    if key == "DB_SERVER":
+                        profiles["postgresql"]["POSTGRES_DB_SERVER"] = value
+                    elif key == "DB_PORT":
+                        profiles["postgresql"]["POSTGRES_DB_PORT"] = value
+                    elif key == "DB_NAME":
+                        profiles["postgresql"]["POSTGRES_DB_NAME"] = value
+                    elif key == "DB_USER":
+                        profiles["postgresql"]["POSTGRES_DB_USER"] = value
+                    elif key == "DB_PASSWORD":
+                        profiles["postgresql"]["POSTGRES_DB_PASSWORD"] = value
+                    elif key == "POSTGRES_DOCKER_CONTAINER":
+                        profiles["postgresql"]["POSTGRES_DOCKER_CONTAINER"] = value
+                    elif key in {"PG_DUMP_BIN", "PG_DUMP"}:
+                        profiles["postgresql"]["PG_DUMP_BIN"] = value
+    except Exception:
+        return profiles
+
+    return profiles
+
+
+def _read_profile_value(
+    cfg: dict[str, str],
+    profile_key: str,
+    fallback_key: str,
+    fallback_engine: str,
+    current_engine: str,
+    default: str = "",
+) -> str:
+    profile_value = cfg.get(profile_key)
+    if profile_value is not None and str(profile_value).strip() != "":
+        return str(profile_value)
+
+    if current_engine == fallback_engine:
+        base_value = cfg.get(fallback_key)
+        if base_value is not None:
+            return str(base_value)
+
+    return default
+
+
+def load_db_target_settings(cfg: dict[str, str] | None = None) -> dict[str, str]:
+    active_cfg = cfg or dotenv_values(ENV_PATH)
+    current_engine = normalize_db_engine(active_cfg.get("DB_ENGINE"), default="mssql")
+    active_engine = normalize_db_engine(active_cfg.get("ACTIVE_DB_ENGINE") or current_engine, default=current_engine)
+
+    settings = {
+        "ACTIVE_DB_ENGINE": active_engine,
+        "MSSQL_DB_SERVER": _read_profile_value(active_cfg, "MSSQL_DB_SERVER", "DB_SERVER", "mssql", current_engine),
+        "MSSQL_DB_PORT": _read_profile_value(active_cfg, "MSSQL_DB_PORT", "DB_PORT", "mssql", current_engine),
+        "MSSQL_DB_NAME": _read_profile_value(active_cfg, "MSSQL_DB_NAME", "DB_NAME", "mssql", current_engine, "master"),
+        "MSSQL_DB_USER": _read_profile_value(active_cfg, "MSSQL_DB_USER", "DB_USER", "mssql", current_engine),
+        "MSSQL_DB_PASSWORD": _read_profile_value(active_cfg, "MSSQL_DB_PASSWORD", "DB_PASSWORD", "mssql", current_engine),
+        "MSSQL_DB_DRIVER": _read_profile_value(
+            active_cfg,
+            "MSSQL_DB_DRIVER",
+            "DB_DRIVER",
+            "mssql",
+            current_engine,
+            "ODBC Driver 18 for SQL Server",
+        ),
+        "POSTGRES_DB_SERVER": _read_profile_value(active_cfg, "POSTGRES_DB_SERVER", "DB_SERVER", "postgresql", current_engine),
+        "POSTGRES_DB_PORT": _read_profile_value(active_cfg, "POSTGRES_DB_PORT", "DB_PORT", "postgresql", current_engine, "5432"),
+        "POSTGRES_DB_NAME": _read_profile_value(active_cfg, "POSTGRES_DB_NAME", "DB_NAME", "postgresql", current_engine, "postgres"),
+        "POSTGRES_DB_USER": _read_profile_value(active_cfg, "POSTGRES_DB_USER", "DB_USER", "postgresql", current_engine),
+        "POSTGRES_DB_PASSWORD": _read_profile_value(active_cfg, "POSTGRES_DB_PASSWORD", "DB_PASSWORD", "postgresql", current_engine),
+        "POSTGRES_DOCKER_CONTAINER": str(active_cfg.get("POSTGRES_DOCKER_CONTAINER") or ""),
+        "PG_DUMP_BIN": str(active_cfg.get("PG_DUMP_BIN") or active_cfg.get("PG_DUMP") or ""),
+    }
+
+    legacy_profiles = load_legacy_engine_profiles_from_env()
+    for profile_key, profile_value in legacy_profiles.get("mssql", {}).items():
+        if not str(settings.get(profile_key) or "").strip() and str(profile_value or "").strip():
+            settings[profile_key] = str(profile_value)
+
+    for profile_key, profile_value in legacy_profiles.get("postgresql", {}).items():
+        if not str(settings.get(profile_key) or "").strip() and str(profile_value or "").strip():
+            settings[profile_key] = str(profile_value)
+
+    return settings
+
+
+def build_active_db_target_updates(target: dict[str, str]) -> dict[str, str]:
+    active_engine = target["ACTIVE_DB_ENGINE"]
+
+    if active_engine == "mssql":
+        required = {
+            "MSSQL_DB_SERVER": target["MSSQL_DB_SERVER"],
+            "MSSQL_DB_NAME": target["MSSQL_DB_NAME"],
+            "MSSQL_DB_USER": target["MSSQL_DB_USER"],
+            "MSSQL_DB_PASSWORD": target["MSSQL_DB_PASSWORD"],
+        }
+        missing = [k for k, v in required.items() if not str(v or "").strip()]
+        if missing:
+            raise ValueError("MSSQL profili eksik alanlar: " + ", ".join(missing))
+
+        updates = {
+            "ACTIVE_DB_ENGINE": "mssql",
+            "DB_ENGINE": "mssql",
+            "DB_SERVER": str(target["MSSQL_DB_SERVER"]),
+            "DB_PORT": str(target["MSSQL_DB_PORT"]),
+            "DB_NAME": str(target["MSSQL_DB_NAME"]),
+            "DB_USER": str(target["MSSQL_DB_USER"]),
+            "DB_PASSWORD": str(target["MSSQL_DB_PASSWORD"]),
+            "DB_DRIVER": str(target["MSSQL_DB_DRIVER"] or "ODBC Driver 18 for SQL Server"),
+        }
+    else:
+        required = {
+            "POSTGRES_DB_SERVER": target["POSTGRES_DB_SERVER"],
+            "POSTGRES_DB_NAME": target["POSTGRES_DB_NAME"],
+            "POSTGRES_DB_USER": target["POSTGRES_DB_USER"],
+            "POSTGRES_DB_PASSWORD": target["POSTGRES_DB_PASSWORD"],
+        }
+        missing = [k for k, v in required.items() if not str(v or "").strip()]
+        if missing:
+            raise ValueError("PostgreSQL profili eksik alanlar: " + ", ".join(missing))
+
+        updates = {
+            "ACTIVE_DB_ENGINE": "postgresql",
+            "DB_ENGINE": "postgresql",
+            "DB_SERVER": str(target["POSTGRES_DB_SERVER"]),
+            "DB_PORT": str(target["POSTGRES_DB_PORT"] or "5432"),
+            "DB_NAME": str(target["POSTGRES_DB_NAME"]),
+            "DB_USER": str(target["POSTGRES_DB_USER"]),
+            "DB_PASSWORD": str(target["POSTGRES_DB_PASSWORD"]),
+            "POSTGRES_DOCKER_CONTAINER": str(target["POSTGRES_DOCKER_CONTAINER"]),
+        }
+        if str(target["PG_DUMP_BIN"]).strip():
+            updates["PG_DUMP_BIN"] = str(target["PG_DUMP_BIN"]).strip()
+
+    return updates
+
+
+def apply_active_db_target() -> dict[str, str]:
+    cfg = dotenv_values(ENV_PATH)
+    target = load_db_target_settings(cfg)
+    updates = build_active_db_target_updates(target)
+
+    for key in DB_TARGET_PROFILE_KEYS:
+        if key in target:
+            persist_setting(key, str(target[key]))
+
+    for key, value in updates.items():
+        persist_setting(key, str(value))
+
+    return updates
+
 DASHBOARD_USER = os.getenv("DASHBOARD_USER")
 DASHBOARD_PASS = os.getenv("DASHBOARD_PASS")
 DB_SERVER = os.getenv("DB_SERVER")
@@ -135,7 +367,7 @@ def load_settings():
         or cfg.get("TELEGRAM_ALERT_THRESHOLD")
         or DEFAULT_SETTINGS["TELEGRAM_THRESHOLD"]
     )
-    return {
+    data = {
         "TELEGRAM_THRESHOLD": telegram_threshold,
         "DISK_WARN_PCT": cfg.get("DISK_WARN_PCT", DEFAULT_SETTINGS["DISK_WARN_PCT"]),
         "DISK_CRIT_PCT": cfg.get("DISK_CRIT_PCT", DEFAULT_SETTINGS["DISK_CRIT_PCT"]),
@@ -175,6 +407,8 @@ def load_settings():
         "RAM_SAMPLE_COUNT": cfg.get("RAM_SAMPLE_COUNT", DEFAULT_SETTINGS["RAM_SAMPLE_COUNT"]),
         "RAM_SAMPLE_INTERVAL_SEC": cfg.get("RAM_SAMPLE_INTERVAL_SEC", DEFAULT_SETTINGS["RAM_SAMPLE_INTERVAL_SEC"]),
     }
+    data.update(load_db_target_settings(cfg))
+    return data
 
 
 def persist_setting(key: str, value: str):
@@ -483,9 +717,29 @@ def api_settings():
         "LOG_SPACE_PENALTY": int,
         "RAM_SAMPLE_COUNT": int,
         "RAM_SAMPLE_INTERVAL_SEC": float,
+        "ACTIVE_DB_ENGINE": str,
+        "MSSQL_DB_SERVER": str,
+        "MSSQL_DB_PORT": str,
+        "MSSQL_DB_NAME": str,
+        "MSSQL_DB_USER": str,
+        "MSSQL_DB_PASSWORD": str,
+        "MSSQL_DB_DRIVER": str,
+        "POSTGRES_DB_SERVER": str,
+        "POSTGRES_DB_PORT": str,
+        "POSTGRES_DB_NAME": str,
+        "POSTGRES_DB_USER": str,
+        "POSTGRES_DB_PASSWORD": str,
+        "POSTGRES_DOCKER_CONTAINER": str,
+        "PG_DUMP_BIN": str,
+        "PG_DUMP": str,
     }
 
-    alias_map = {"TELEGRAM_ALERT_THRESHOLD": "TELEGRAM_THRESHOLD"}
+    alias_map = {
+        "TELEGRAM_ALERT_THRESHOLD": "TELEGRAM_THRESHOLD",
+        "PG_DUMP": "PG_DUMP_BIN",
+    }
+
+    db_target_keys = set(DB_TARGET_PROFILE_KEYS)
 
     if request.method == "GET":
         if request.args.get("defaults"):
@@ -494,6 +748,7 @@ def api_settings():
 
     data = request.get_json(silent=True) or {}
     updated = {}
+    pending_db_target: dict[str, str] = {}
     for raw_key, raw_val in data.items():
         key = alias_map.get(raw_key, raw_key)
         if key not in allowed_keys:
@@ -503,10 +758,37 @@ def api_settings():
             val = caster(raw_val)
         except Exception:
             return jsonify({"error": f"{key} geçersiz değer"}), 400
-        persist_setting(key, str(val))
+
+        val_str = str(val)
+        if key in db_target_keys:
+            pending_db_target[key] = val_str
+            continue
+
+        persist_setting(key, val_str)
         if key == "TELEGRAM_THRESHOLD":
-            persist_setting("TELEGRAM_ALERT_THRESHOLD", str(val))
-        updated[key] = str(val)
+            persist_setting("TELEGRAM_ALERT_THRESHOLD", val_str)
+        updated[key] = val_str
+
+    if pending_db_target:
+        try:
+            preview_cfg = dotenv_values(ENV_PATH)
+            preview_cfg.update(pending_db_target)
+
+            target_preview = load_db_target_settings(preview_cfg)
+            active_updates = build_active_db_target_updates(target_preview)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+        # Persist profile keys explicitly to keep two-way switching stable.
+        for key in DB_TARGET_PROFILE_KEYS:
+            if key not in target_preview:
+                continue
+            persist_setting(key, str(target_preview[key]))
+            updated[key] = str(target_preview[key])
+
+        for key, value in active_updates.items():
+            persist_setting(key, str(value))
+            updated[key] = str(value)
 
     if not updated:
         return jsonify({"error": "Güncellenecek anahtar yok"}), 400
@@ -568,7 +850,10 @@ def api_monitoring_databases():
 
     warning = None
     database_names = []
+    system_db_names: set[str] = set()
     try:
+        adapter = get_db_adapter()
+        system_db_names = {str(name).lower() for name in adapter.get_system_databases()}
         database_names = get_live_database_names()
     except Exception as e:
         warning = f"Canli veritabani listesi alinamadi: {e}"
@@ -579,6 +864,7 @@ def api_monitoring_databases():
         payload.append({
             "name": db_name,
             "is_monitored": monitored_map.get(db_name, True),
+            "is_system": str(db_name).lower() in system_db_names,
         })
 
     conn.close()
