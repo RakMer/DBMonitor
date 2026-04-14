@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="60">
+    <meta http-equiv="refresh" content="300">
     <title>DB Monitor – Health Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -653,6 +653,11 @@
                 </select>
                 <small class="text-secondary">Kaydettikten sonra izleme secili motora gecis yapar.</small>
             </div>
+            <div class="col-12">
+                <label class="form-label text-secondary small">Sunucu Etiketi (ops.)</label>
+                <input id="set-target-label" type="text" class="form-control bg-dark text-light" placeholder="Ornek: Prod PostgreSQL / Test MSSQL">
+                <small class="text-secondary">Bos birakirsan sunucu bilgilerine gore otomatik ad uretilir.</small>
+            </div>
         </div>
 
         <div id="mssql-config-block" class="mt-3">
@@ -715,6 +720,92 @@
                 <div class="col-12">
                     <label class="form-label text-secondary small">pg_dump yolu (ops.)</label>
                     <input id="set-pg-dump-bin" type="text" class="form-control bg-dark text-light" placeholder="pg_dump">
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-3">
+            <div class="text-secondary small mb-2">Kayitli Sunucular</div>
+            <div class="d-flex gap-2 mb-2 flex-wrap">
+                <select id="saved-targets" class="form-select bg-dark text-light" style="min-width:260px; flex: 1;"></select>
+                <button id="activate-target" class="btn btn-sm btn-outline-light" type="button">
+                    <i class="bi bi-plug me-1"></i>Secilene Gec
+                </button>
+                <button id="edit-target" class="btn btn-sm btn-outline-light" type="button">
+                    <i class="bi bi-pencil-square me-1"></i>Duzenle
+                </button>
+                <button id="refresh-targets" class="btn btn-sm btn-outline-light" type="button" title="Listeyi yenile">
+                    <i class="bi bi-arrow-repeat"></i>
+                </button>
+            </div>
+            <span id="targets-status" class="text-secondary small"></span>
+
+            <div id="target-editor" class="border border-secondary border-opacity-25 rounded p-3 mt-3" style="display:none;">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <div id="target-editor-title" class="text-secondary small">Sunucu Duzenle</div>
+                    <button id="target-editor-close" class="btn btn-sm btn-outline-light" type="button">
+                        <i class="bi bi-x-lg"></i>
+                    </button>
+                </div>
+
+                <input id="edit-target-id" type="hidden">
+                <div class="row g-2">
+                    <div class="col-6">
+                        <label class="form-label text-secondary small">Motor</label>
+                        <select id="edit-target-engine" class="form-select bg-dark text-light">
+                            <option value="mssql">MSSQL</option>
+                            <option value="postgresql">PostgreSQL</option>
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label text-secondary small">Etiket</label>
+                        <input id="edit-target-label" type="text" class="form-control bg-dark text-light" placeholder="Prod PostgreSQL">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label text-secondary small">Server</label>
+                        <input id="edit-target-server" type="text" class="form-control bg-dark text-light" placeholder="127.0.0.1">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label text-secondary small">Port</label>
+                        <input id="edit-target-port" type="text" class="form-control bg-dark text-light" placeholder="5432 / 1433">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label text-secondary small">Database</label>
+                        <input id="edit-target-db" type="text" class="form-control bg-dark text-light" placeholder="master / postgres">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label text-secondary small">Kullanici</label>
+                        <input id="edit-target-user" type="text" class="form-control bg-dark text-light">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label text-secondary small">Sifre</label>
+                        <input id="edit-target-password" type="password" class="form-control bg-dark text-light">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label text-secondary small">MSSQL Driver</label>
+                        <input id="edit-target-driver" type="text" class="form-control bg-dark text-light" placeholder="ODBC Driver 18 for SQL Server">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label text-secondary small">PG Docker Container</label>
+                        <input id="edit-target-container" type="text" class="form-control bg-dark text-light" placeholder="myPostgres">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label text-secondary small">PG Dump Bin</label>
+                        <input id="edit-target-dump-bin" type="text" class="form-control bg-dark text-light" placeholder="pg_dump">
+                    </div>
+                    <div class="col-12 form-check mt-2 ms-1">
+                        <input id="edit-target-make-active" class="form-check-input" type="checkbox">
+                        <label class="form-check-label text-secondary small" for="edit-target-make-active">Guncelleyince aktif yap</label>
+                    </div>
+                </div>
+
+                <div class="d-flex gap-2 mt-3">
+                    <button id="save-target-edit" class="btn btn-sm btn-outline-light" type="button">
+                        <i class="bi bi-save me-1"></i>Degisiklikleri Kaydet
+                    </button>
+                    <button id="delete-target" class="btn btn-sm btn-outline-danger" type="button">
+                        <i class="bi bi-trash me-1"></i>Sil
+                    </button>
                 </div>
             </div>
         </div>
@@ -901,9 +992,33 @@
     const clearAllDbBtn = document.getElementById('db-clear-all');
     const dbSearchInput = document.getElementById('db-search');
     const activeDbEngineInput = document.getElementById('set-active-db-engine');
+    const targetLabelInput = document.getElementById('set-target-label');
     const mssqlConfigBlock = document.getElementById('mssql-config-block');
     const postgresConfigBlock = document.getElementById('postgres-config-block');
+    const savedTargetsSelect = document.getElementById('saved-targets');
+    const activateTargetBtn = document.getElementById('activate-target');
+    const editTargetBtn = document.getElementById('edit-target');
+    const refreshTargetsBtn = document.getElementById('refresh-targets');
+    const targetsStatus = document.getElementById('targets-status');
+    const targetEditor = document.getElementById('target-editor');
+    const targetEditorTitle = document.getElementById('target-editor-title');
+    const targetEditorCloseBtn = document.getElementById('target-editor-close');
+    const editTargetIdInput = document.getElementById('edit-target-id');
+    const editTargetEngineInput = document.getElementById('edit-target-engine');
+    const editTargetLabelInput = document.getElementById('edit-target-label');
+    const editTargetServerInput = document.getElementById('edit-target-server');
+    const editTargetPortInput = document.getElementById('edit-target-port');
+    const editTargetDbInput = document.getElementById('edit-target-db');
+    const editTargetUserInput = document.getElementById('edit-target-user');
+    const editTargetPasswordInput = document.getElementById('edit-target-password');
+    const editTargetDriverInput = document.getElementById('edit-target-driver');
+    const editTargetContainerInput = document.getElementById('edit-target-container');
+    const editTargetDumpBinInput = document.getElementById('edit-target-dump-bin');
+    const editTargetMakeActiveInput = document.getElementById('edit-target-make-active');
+    const saveTargetEditBtn = document.getElementById('save-target-edit');
+    const deleteTargetBtn = document.getElementById('delete-target');
     let monitoringDatabases = [];
+    let savedTargets = [];
     const SYSTEM_DBS = new Set(['master', 'tempdb', 'model', 'msdb']);
 
     function toggleDbTargetFields() {
@@ -928,7 +1043,202 @@
         Object.entries(settingsMap).forEach(([key, input]) => {
             if (input && input.value !== '') payload[key] = input.value;
         });
+        if (targetLabelInput && targetLabelInput.value.trim()) {
+            payload.ACTIVE_TARGET_LABEL = targetLabelInput.value.trim();
+        }
         return payload;
+    }
+
+    function renderSavedTargets() {
+        if (!savedTargetsSelect) return;
+
+        savedTargetsSelect.innerHTML = '';
+        if (!savedTargets.length) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = 'Kayitli sunucu yok';
+            opt.disabled = true;
+            opt.selected = true;
+            savedTargetsSelect.appendChild(opt);
+            if (activateTargetBtn) activateTargetBtn.disabled = true;
+            return;
+        }
+
+        savedTargets.forEach(target => {
+            const opt = document.createElement('option');
+            opt.value = String(target.id);
+            const marker = target.is_active ? '● ' : '';
+            const portPart = target.port ? `:${target.port}` : '';
+            const details = `${target.server}${portPart}/${target.database_name}`;
+            opt.textContent = `${marker}[${String(target.engine || '').toUpperCase()}] ${target.target_label} - ${details}`;
+            if (target.is_active) {
+                opt.selected = true;
+            }
+            savedTargetsSelect.appendChild(opt);
+        });
+
+        if (activateTargetBtn) activateTargetBtn.disabled = false;
+        if (editTargetBtn) editTargetBtn.disabled = false;
+    }
+
+    function closeTargetEditor() {
+        if (targetEditor) targetEditor.style.display = 'none';
+        if (editTargetIdInput) editTargetIdInput.value = '';
+    }
+
+    function fillTargetEditorForm(target) {
+        if (!target) return;
+        if (editTargetIdInput) editTargetIdInput.value = String(target.id || '');
+        if (editTargetEngineInput) editTargetEngineInput.value = String(target.engine || 'mssql');
+        if (editTargetLabelInput) editTargetLabelInput.value = String(target.target_label || '');
+        if (editTargetServerInput) editTargetServerInput.value = String(target.server || '');
+        if (editTargetPortInput) editTargetPortInput.value = String(target.port || '');
+        if (editTargetDbInput) editTargetDbInput.value = String(target.database_name || '');
+        if (editTargetUserInput) editTargetUserInput.value = String(target.username || '');
+        if (editTargetPasswordInput) editTargetPasswordInput.value = String(target.password || '');
+        if (editTargetDriverInput) editTargetDriverInput.value = String(target.driver || '');
+        if (editTargetContainerInput) editTargetContainerInput.value = String(target.docker_container || '');
+        if (editTargetDumpBinInput) editTargetDumpBinInput.value = String(target.pg_dump_bin || '');
+        if (editTargetMakeActiveInput) editTargetMakeActiveInput.checked = Boolean(target.is_active);
+        if (targetEditorTitle) {
+            targetEditorTitle.textContent = `Sunucu Duzenle: ${target.target_label || target.server || ''}`;
+        }
+    }
+
+    async function loadConnectionTargets() {
+        if (!savedTargetsSelect) return;
+        try {
+            const res = await fetch('/api/connection-targets');
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Kayitli sunucular alinamadi');
+            savedTargets = data.targets || [];
+            renderSavedTargets();
+            if (targetsStatus) targetsStatus.textContent = '';
+        } catch (err) {
+            if (targetsStatus) targetsStatus.textContent = err.message;
+        }
+    }
+
+    async function activateSelectedTarget() {
+        if (!savedTargetsSelect) return;
+        const targetId = parseInt(savedTargetsSelect.value || '0', 10);
+        if (!targetId) return;
+
+        if (activateTargetBtn) activateTargetBtn.disabled = true;
+        if (targetsStatus) targetsStatus.textContent = 'Sunucu gecisi yapiliyor...';
+
+        try {
+            const res = await fetch('/api/connection-targets/activate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_id: targetId }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Sunucu gecisi basarisiz');
+
+            if (targetsStatus) targetsStatus.textContent = 'Sunucu degistirildi';
+            if (targetLabelInput) targetLabelInput.value = '';
+
+            await loadSettingsForm();
+            await loadMonitoringDatabases();
+            await loadConnectionTargets();
+        } catch (err) {
+            if (targetsStatus) targetsStatus.textContent = err.message;
+        } finally {
+            if (activateTargetBtn) activateTargetBtn.disabled = false;
+        }
+    }
+
+    async function openTargetEditor() {
+        if (!savedTargetsSelect) return;
+        const targetId = parseInt(savedTargetsSelect.value || '0', 10);
+        if (!targetId) return;
+
+        if (targetsStatus) targetsStatus.textContent = 'Sunucu bilgileri yukleniyor...';
+        try {
+            const res = await fetch(`/api/connection-targets/${targetId}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Sunucu bilgileri alinamadi');
+            fillTargetEditorForm(data.target || {});
+            if (targetEditor) targetEditor.style.display = '';
+            if (targetsStatus) targetsStatus.textContent = '';
+        } catch (err) {
+            if (targetsStatus) targetsStatus.textContent = err.message;
+        }
+    }
+
+    async function saveTargetEdits() {
+        const targetId = parseInt(editTargetIdInput ? editTargetIdInput.value : '0', 10);
+        if (!targetId) return;
+
+        const payload = {
+            target_id: targetId,
+            engine: editTargetEngineInput ? editTargetEngineInput.value : 'mssql',
+            target_label: editTargetLabelInput ? editTargetLabelInput.value : '',
+            server: editTargetServerInput ? editTargetServerInput.value : '',
+            port: editTargetPortInput ? editTargetPortInput.value : '',
+            database_name: editTargetDbInput ? editTargetDbInput.value : '',
+            username: editTargetUserInput ? editTargetUserInput.value : '',
+            password: editTargetPasswordInput ? editTargetPasswordInput.value : '',
+            driver: editTargetDriverInput ? editTargetDriverInput.value : '',
+            docker_container: editTargetContainerInput ? editTargetContainerInput.value : '',
+            pg_dump_bin: editTargetDumpBinInput ? editTargetDumpBinInput.value : '',
+            is_active: Boolean(editTargetMakeActiveInput && editTargetMakeActiveInput.checked),
+        };
+
+        if (saveTargetEditBtn) saveTargetEditBtn.disabled = true;
+        if (deleteTargetBtn) deleteTargetBtn.disabled = true;
+        if (targetsStatus) targetsStatus.textContent = 'Sunucu guncelleniyor...';
+
+        try {
+            const res = await fetch('/api/connection-targets/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Sunucu guncellenemedi');
+
+            if (targetsStatus) targetsStatus.textContent = 'Sunucu guncellendi';
+            await loadConnectionTargets();
+            await loadSettingsForm();
+            await loadMonitoringDatabases();
+            closeTargetEditor();
+        } catch (err) {
+            if (targetsStatus) targetsStatus.textContent = err.message;
+        } finally {
+            if (saveTargetEditBtn) saveTargetEditBtn.disabled = false;
+            if (deleteTargetBtn) deleteTargetBtn.disabled = false;
+        }
+    }
+
+    async function deleteTarget() {
+        const targetId = parseInt(editTargetIdInput ? editTargetIdInput.value : '0', 10);
+        if (!targetId) return;
+        if (!window.confirm('Bu sunucuyu listeden silmek istiyor musun?')) return;
+
+        if (saveTargetEditBtn) saveTargetEditBtn.disabled = true;
+        if (deleteTargetBtn) deleteTargetBtn.disabled = true;
+        if (targetsStatus) targetsStatus.textContent = 'Sunucu siliniyor...';
+
+        try {
+            const res = await fetch('/api/connection-targets/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_id: targetId }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Sunucu silinemedi');
+
+            if (targetsStatus) targetsStatus.textContent = 'Sunucu silindi';
+            closeTargetEditor();
+            await loadConnectionTargets();
+        } catch (err) {
+            if (targetsStatus) targetsStatus.textContent = err.message;
+        } finally {
+            if (saveTargetEditBtn) saveTargetEditBtn.disabled = false;
+            if (deleteTargetBtn) deleteTargetBtn.disabled = false;
+        }
     }
 
     async function submitSettings(payload, statusText = 'Kaydedildi') {
@@ -968,7 +1278,9 @@
             const payload = collectPayload();
             const ok = await submitSettings(payload, 'Kaydedildi');
             if (ok) {
+                if (targetLabelInput) targetLabelInput.value = '';
                 await loadMonitoringDatabases();
+                await loadConnectionTargets();
             }
             saveBtn.disabled = false;
             if (resetBtn) resetBtn.disabled = false;
@@ -1103,7 +1415,32 @@
         dbSearchInput.addEventListener('input', renderMonitoringList);
     }
 
+    if (activateTargetBtn) {
+        activateTargetBtn.addEventListener('click', activateSelectedTarget);
+    }
+
+    if (editTargetBtn) {
+        editTargetBtn.addEventListener('click', openTargetEditor);
+    }
+
+    if (targetEditorCloseBtn) {
+        targetEditorCloseBtn.addEventListener('click', closeTargetEditor);
+    }
+
+    if (saveTargetEditBtn) {
+        saveTargetEditBtn.addEventListener('click', saveTargetEdits);
+    }
+
+    if (deleteTargetBtn) {
+        deleteTargetBtn.addEventListener('click', deleteTarget);
+    }
+
+    if (refreshTargetsBtn) {
+        refreshTargetsBtn.addEventListener('click', loadConnectionTargets);
+    }
+
     loadMonitoringDatabases();
+    loadConnectionTargets();
 
     async function readJsonOrText(res) {
         const raw = await res.text();

@@ -496,6 +496,231 @@ def ensure_resource_tables(conn):
     conn.commit()
 
 
+def ensure_connection_targets_table(conn):
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ConnectionTargets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engine TEXT NOT NULL,
+            target_label TEXT NOT NULL,
+            target_key TEXT NOT NULL UNIQUE,
+            server TEXT NOT NULL,
+            port TEXT,
+            database_name TEXT NOT NULL,
+            username TEXT NOT NULL,
+            password TEXT NOT NULL,
+            driver TEXT,
+            docker_container TEXT,
+            pg_dump_bin TEXT,
+            is_active INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.commit()
+
+
+def build_connection_target_key(engine: str, server: str, port: str, database_name: str, username: str) -> str:
+    norm_engine = normalize_db_engine(engine, default="mssql")
+    return "|".join(
+        [
+            norm_engine,
+            str(server or "").strip().lower(),
+            str(port or "").strip(),
+            str(database_name or "").strip().lower(),
+            str(username or "").strip().lower(),
+        ]
+    )
+
+
+def build_connection_target_label(engine: str, server: str, port: str, database_name: str, username: str) -> str:
+    port_text = f":{str(port).strip()}" if str(port or "").strip() else ""
+    db_text = f"/{database_name}" if str(database_name or "").strip() else ""
+    user_text = f" ({username})" if str(username or "").strip() else ""
+    return f"[{normalize_db_engine(engine, default='mssql').upper()}] {server}{port_text}{db_text}{user_text}"
+
+
+def _target_row_to_public_dict(row) -> dict[str, object]:
+    return {
+        "id": int(row["id"]),
+        "engine": str(row["engine"]),
+        "target_label": str(row["target_label"]),
+        "server": str(row["server"]),
+        "port": str(row["port"] or ""),
+        "database_name": str(row["database_name"]),
+        "username": str(row["username"]),
+        "is_active": bool(row["is_active"]),
+        "updated_at": row["updated_at"],
+    }
+
+
+def _target_row_to_private_dict(row) -> dict[str, object]:
+    data = _target_row_to_public_dict(row)
+    data.update(
+        {
+            "password": str(row["password"] or ""),
+            "driver": str(row["driver"] or ""),
+            "docker_container": str(row["docker_container"] or ""),
+            "pg_dump_bin": str(row["pg_dump_bin"] or ""),
+        }
+    )
+    return data
+
+
+def extract_active_target_from_settings(target: dict[str, str], label_hint: str = "") -> dict[str, str] | None:
+    active_engine = normalize_db_engine(target.get("ACTIVE_DB_ENGINE"), default="mssql")
+
+    if active_engine == "mssql":
+        server = str(target.get("MSSQL_DB_SERVER") or "").strip()
+        database_name = str(target.get("MSSQL_DB_NAME") or "").strip()
+        username = str(target.get("MSSQL_DB_USER") or "").strip()
+        password = str(target.get("MSSQL_DB_PASSWORD") or "").strip()
+        if not all([server, database_name, username, password]):
+            return None
+        return {
+            "engine": "mssql",
+            "target_label": str(label_hint or "").strip(),
+            "server": server,
+            "port": str(target.get("MSSQL_DB_PORT") or "").strip(),
+            "database_name": database_name,
+            "username": username,
+            "password": password,
+            "driver": str(target.get("MSSQL_DB_DRIVER") or "").strip(),
+            "docker_container": "",
+            "pg_dump_bin": "",
+        }
+
+    server = str(target.get("POSTGRES_DB_SERVER") or "").strip()
+    database_name = str(target.get("POSTGRES_DB_NAME") or "").strip()
+    username = str(target.get("POSTGRES_DB_USER") or "").strip()
+    password = str(target.get("POSTGRES_DB_PASSWORD") or "").strip()
+    if not all([server, database_name, username, password]):
+        return None
+    return {
+        "engine": "postgresql",
+        "target_label": str(label_hint or "").strip(),
+        "server": server,
+        "port": str(target.get("POSTGRES_DB_PORT") or "5432").strip(),
+        "database_name": database_name,
+        "username": username,
+        "password": password,
+        "driver": "",
+        "docker_container": str(target.get("POSTGRES_DOCKER_CONTAINER") or "").strip(),
+        "pg_dump_bin": str(target.get("PG_DUMP_BIN") or "").strip(),
+    }
+
+
+def upsert_connection_target(conn, target: dict[str, str], set_active: bool = True):
+    ensure_connection_targets_table(conn)
+    cursor = conn.cursor()
+
+    engine = normalize_db_engine(target.get("engine"), default="mssql")
+    server = str(target.get("server") or "").strip()
+    port = str(target.get("port") or "").strip()
+    database_name = str(target.get("database_name") or "").strip()
+    username = str(target.get("username") or "").strip()
+    password = str(target.get("password") or "").strip()
+
+    if not all([server, database_name, username, password]):
+        return None
+
+    target_key = build_connection_target_key(engine, server, port, database_name, username)
+    target_label = str(target.get("target_label") or "").strip() or build_connection_target_label(
+        engine, server, port, database_name, username
+    )
+
+    cursor.execute("SELECT id FROM ConnectionTargets WHERE target_key = ?", (target_key,))
+    existing = cursor.fetchone()
+    target_id = int(existing[0]) if existing else None
+
+    if target_id is not None:
+        cursor.execute(
+            """
+            UPDATE ConnectionTargets
+            SET target_label = ?,
+                server = ?,
+                port = ?,
+                database_name = ?,
+                username = ?,
+                password = ?,
+                driver = ?,
+                docker_container = ?,
+                pg_dump_bin = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (
+                target_label,
+                server,
+                port,
+                database_name,
+                username,
+                password,
+                str(target.get("driver") or "").strip(),
+                str(target.get("docker_container") or "").strip(),
+                str(target.get("pg_dump_bin") or "").strip(),
+                target_id,
+            ),
+        )
+    else:
+        cursor.execute(
+            """
+            INSERT INTO ConnectionTargets (
+                engine, target_label, target_key,
+                server, port, database_name, username, password,
+                driver, docker_container, pg_dump_bin,
+                is_active, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'), datetime('now'))
+            """,
+            (
+                engine,
+                target_label,
+                target_key,
+                server,
+                port,
+                database_name,
+                username,
+                password,
+                str(target.get("driver") or "").strip(),
+                str(target.get("docker_container") or "").strip(),
+                str(target.get("pg_dump_bin") or "").strip(),
+            ),
+        )
+        target_id = int(cursor.lastrowid)
+
+    if set_active:
+        cursor.execute("UPDATE ConnectionTargets SET is_active = 0 WHERE is_active = 1")
+        cursor.execute("UPDATE ConnectionTargets SET is_active = 1, updated_at = datetime('now') WHERE id = ?", (target_id,))
+
+    conn.commit()
+    cursor.execute("SELECT * FROM ConnectionTargets WHERE id = ?", (target_id,))
+    return cursor.fetchone()
+
+
+def persist_target_row_to_profile(row):
+    engine = normalize_db_engine(row["engine"], default="mssql")
+    if engine == "mssql":
+        persist_setting("MSSQL_DB_SERVER", str(row["server"] or ""))
+        persist_setting("MSSQL_DB_PORT", str(row["port"] or ""))
+        persist_setting("MSSQL_DB_NAME", str(row["database_name"] or "master"))
+        persist_setting("MSSQL_DB_USER", str(row["username"] or ""))
+        persist_setting("MSSQL_DB_PASSWORD", str(row["password"] or ""))
+        persist_setting("MSSQL_DB_DRIVER", str(row["driver"] or "ODBC Driver 18 for SQL Server"))
+        persist_setting("ACTIVE_DB_ENGINE", "mssql")
+    else:
+        persist_setting("POSTGRES_DB_SERVER", str(row["server"] or ""))
+        persist_setting("POSTGRES_DB_PORT", str(row["port"] or "5432"))
+        persist_setting("POSTGRES_DB_NAME", str(row["database_name"] or "postgres"))
+        persist_setting("POSTGRES_DB_USER", str(row["username"] or ""))
+        persist_setting("POSTGRES_DB_PASSWORD", str(row["password"] or ""))
+        persist_setting("POSTGRES_DOCKER_CONTAINER", str(row["docker_container"] or ""))
+        persist_setting("PG_DUMP_BIN", str(row["pg_dump_bin"] or ""))
+        persist_setting("ACTIVE_DB_ENGINE", "postgresql")
+
+
 def parse_snapshot_time(value: str):
     if not value:
         return None
@@ -747,6 +972,7 @@ def api_settings():
         return jsonify(load_settings())
 
     data = request.get_json(silent=True) or {}
+    target_label_hint = str(data.get("ACTIVE_TARGET_LABEL") or "").strip()
     updated = {}
     pending_db_target: dict[str, str] = {}
     for raw_key, raw_val in data.items():
@@ -790,10 +1016,255 @@ def api_settings():
             persist_setting(key, str(value))
             updated[key] = str(value)
 
+        conn = get_db()
+        try:
+            ensure_connection_targets_table(conn)
+            active_target_payload = extract_active_target_from_settings(target_preview, label_hint=target_label_hint)
+            if active_target_payload:
+                saved_target_row = upsert_connection_target(conn, active_target_payload, set_active=True)
+                if saved_target_row:
+                    updated["ACTIVE_TARGET_ID"] = str(saved_target_row["id"])
+                    updated["ACTIVE_TARGET_LABEL"] = str(saved_target_row["target_label"])
+        finally:
+            conn.close()
+
     if not updated:
         return jsonify({"error": "Güncellenecek anahtar yok"}), 400
 
     return jsonify({"status": "ok", "updated": updated})
+
+
+@app.route("/api/connection-targets", methods=["GET"])
+def api_connection_targets():
+    guard = enforce_auth()
+    if guard:
+        return guard
+
+    conn = get_db()
+    ensure_connection_targets_table(conn)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, engine, target_label, server, port, database_name, username, is_active, updated_at
+        FROM ConnectionTargets
+        ORDER BY is_active DESC, engine ASC, target_label COLLATE NOCASE ASC
+        """
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    targets = [_target_row_to_public_dict(row) for row in rows]
+    return jsonify({"targets": targets, "count": len(targets)})
+
+
+@app.route("/api/connection-targets/activate", methods=["POST"])
+def api_activate_connection_target():
+    guard = enforce_auth()
+    if guard:
+        return guard
+
+    data = request.get_json(silent=True) or {}
+    try:
+        target_id = int(data.get("target_id"))
+    except Exception:
+        return jsonify({"error": "Gecerli target_id gerekli"}), 400
+
+    if target_id <= 0:
+        return jsonify({"error": "Gecerli target_id gerekli"}), 400
+
+    conn = get_db()
+    ensure_connection_targets_table(conn)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ConnectionTargets WHERE id = ?", (target_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "Hedef sunucu bulunamadi"}), 404
+
+    cursor.execute("UPDATE ConnectionTargets SET is_active = 0 WHERE is_active = 1")
+    cursor.execute(
+        "UPDATE ConnectionTargets SET is_active = 1, updated_at = datetime('now') WHERE id = ?",
+        (target_id,),
+    )
+    conn.commit()
+    cursor.execute("SELECT * FROM ConnectionTargets WHERE id = ?", (target_id,))
+    active_row = cursor.fetchone()
+    conn.close()
+
+    persist_target_row_to_profile(active_row)
+    try:
+        applied_updates = apply_active_db_target()
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify(
+        {
+            "status": "ok",
+            "active_target": _target_row_to_public_dict(active_row),
+            "updated": applied_updates,
+        }
+    )
+
+
+@app.route("/api/connection-targets/<int:target_id>", methods=["GET"])
+def api_get_connection_target(target_id: int):
+    guard = enforce_auth()
+    if guard:
+        return guard
+
+    if target_id <= 0:
+        return jsonify({"error": "Gecerli target_id gerekli"}), 400
+
+    conn = get_db()
+    ensure_connection_targets_table(conn)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ConnectionTargets WHERE id = ?", (target_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return jsonify({"error": "Hedef sunucu bulunamadi"}), 404
+
+    return jsonify({"target": _target_row_to_private_dict(row)})
+
+
+@app.route("/api/connection-targets/update", methods=["POST"])
+def api_update_connection_target():
+    guard = enforce_auth()
+    if guard:
+        return guard
+
+    data = request.get_json(silent=True) or {}
+    try:
+        target_id = int(data.get("target_id"))
+    except Exception:
+        return jsonify({"error": "Gecerli target_id gerekli"}), 400
+
+    if target_id <= 0:
+        return jsonify({"error": "Gecerli target_id gerekli"}), 400
+
+    engine = normalize_db_engine(data.get("engine"), default="mssql")
+    target_label = str(data.get("target_label") or "").strip()
+    server = str(data.get("server") or "").strip()
+    port = str(data.get("port") or "").strip()
+    database_name = str(data.get("database_name") or "").strip()
+    username = str(data.get("username") or "").strip()
+    password = str(data.get("password") or "").strip()
+    driver = str(data.get("driver") or "").strip()
+    docker_container = str(data.get("docker_container") or "").strip()
+    pg_dump_bin = str(data.get("pg_dump_bin") or "").strip()
+    make_active = bool(data.get("is_active"))
+
+    if not all([server, database_name, username, password]):
+        return jsonify({"error": "Server/DB/Kullanici/Sifre zorunlu"}), 400
+
+    target_key = build_connection_target_key(engine, server, port, database_name, username)
+    if not target_label:
+        target_label = build_connection_target_label(engine, server, port, database_name, username)
+
+    conn = get_db()
+    ensure_connection_targets_table(conn)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM ConnectionTargets WHERE id = ?", (target_id,))
+    current_row = cursor.fetchone()
+    if not current_row:
+        conn.close()
+        return jsonify({"error": "Hedef sunucu bulunamadi"}), 404
+
+    cursor.execute("SELECT id FROM ConnectionTargets WHERE target_key = ? AND id <> ?", (target_key, target_id))
+    if cursor.fetchone():
+        conn.close()
+        return jsonify({"error": "Bu baglanti zaten listede mevcut"}), 409
+
+    cursor.execute(
+        """
+        UPDATE ConnectionTargets
+        SET engine = ?,
+            target_label = ?,
+            target_key = ?,
+            server = ?,
+            port = ?,
+            database_name = ?,
+            username = ?,
+            password = ?,
+            driver = ?,
+            docker_container = ?,
+            pg_dump_bin = ?,
+            updated_at = datetime('now')
+        WHERE id = ?
+        """,
+        (
+            engine,
+            target_label,
+            target_key,
+            server,
+            port,
+            database_name,
+            username,
+            password,
+            driver,
+            docker_container,
+            pg_dump_bin,
+            target_id,
+        ),
+    )
+
+    if make_active:
+        cursor.execute("UPDATE ConnectionTargets SET is_active = 0 WHERE is_active = 1")
+        cursor.execute("UPDATE ConnectionTargets SET is_active = 1, updated_at = datetime('now') WHERE id = ?", (target_id,))
+
+    conn.commit()
+    cursor.execute("SELECT * FROM ConnectionTargets WHERE id = ?", (target_id,))
+    updated_row = cursor.fetchone()
+    conn.close()
+
+    applied_updates = None
+    if bool(updated_row["is_active"]):
+        persist_target_row_to_profile(updated_row)
+        try:
+            applied_updates = apply_active_db_target()
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+    return jsonify(
+        {
+            "status": "ok",
+            "target": _target_row_to_public_dict(updated_row),
+            "updated": applied_updates,
+        }
+    )
+
+
+@app.route("/api/connection-targets/delete", methods=["POST"])
+def api_delete_connection_target():
+    guard = enforce_auth()
+    if guard:
+        return guard
+
+    data = request.get_json(silent=True) or {}
+    try:
+        target_id = int(data.get("target_id"))
+    except Exception:
+        return jsonify({"error": "Gecerli target_id gerekli"}), 400
+
+    if target_id <= 0:
+        return jsonify({"error": "Gecerli target_id gerekli"}), 400
+
+    conn = get_db()
+    ensure_connection_targets_table(conn)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ConnectionTargets WHERE id = ?", (target_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "Hedef sunucu bulunamadi"}), 404
+
+    cursor.execute("DELETE FROM ConnectionTargets WHERE id = ?", (target_id,))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"status": "ok", "deleted_id": target_id})
 
 
 @app.route("/api/monitoring-databases", methods=["GET", "POST"])
