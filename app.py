@@ -9,6 +9,8 @@ from datetime import datetime
 from flask import Flask, Response, jsonify, render_template, request
 from dotenv import dotenv_values, load_dotenv, set_key
 from db_adapters import MSSQLAdapter, PostgresAdapter, get_db_adapter
+from db_utils import get_sqlite_conn
+from log_utils import emit_log, make_correlation_id, setup_process_logger
 
 
 
@@ -32,6 +34,7 @@ RUN_CHECK_STATE = {
     "error": "",
     "started_at": None,
     "finished_at": None,
+    "check_id": None,
 }
 
 # Shared alert throttle state used by Test.py
@@ -41,6 +44,7 @@ alert_resend_after = None
 
 # Load .env so security credentials can be read from environment
 load_dotenv(ENV_PATH)
+APP_LOGGER = setup_process_logger("app")
 
 DEFAULT_SETTINGS = {
     "TELEGRAM_THRESHOLD": "70",
@@ -417,9 +421,71 @@ def persist_setting(key: str, value: str):
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return get_sqlite_conn(DB_PATH, timeout=10, row_factory=sqlite3.Row)
+
+
+def _resolve_backup_dir() -> str:
+    configured = str(os.getenv("BACKUP_DIR") or "").strip()
+    if configured:
+        return configured
+    return os.path.join(BASE_DIR, "Backups")
+
+
+def verify_startup() -> tuple[bool, list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    required_vars = ["DB_ENGINE", "DB_SERVER", "DB_NAME", "DB_USER", "DB_PASSWORD"]
+    for var_name in required_vars:
+        if not str(os.getenv(var_name) or "").strip():
+            errors.append(f".env icinde {var_name} eksik")
+
+    engine = normalize_db_engine(os.getenv("DB_ENGINE"), default="")
+    if engine not in {"mssql", "postgresql"}:
+        errors.append(".env icinde DB_ENGINE gecersiz (mssql veya postgresql olmali)")
+    elif engine == "mssql" and not str(os.getenv("DB_DRIVER") or "").strip():
+        errors.append(".env icinde DB_DRIVER eksik (MSSQL icin zorunlu)")
+
+    sqlite_dir = os.path.dirname(DB_PATH) or BASE_DIR
+    try:
+        os.makedirs(sqlite_dir, exist_ok=True)
+        with open(DB_PATH, "a", encoding="utf-8"):
+            pass
+        sqlite_conn = get_sqlite_conn(DB_PATH, timeout=10)
+        try:
+            sqlite_conn.execute("PRAGMA user_version")
+        finally:
+            sqlite_conn.close()
+    except Exception as e:
+        errors.append(f"SQLite dosyasina yazma/erisim hatasi: {e}")
+
+    backup_dir = _resolve_backup_dir()
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        probe_file = os.path.join(backup_dir, ".dbmonitor_write_probe")
+        with open(probe_file, "a", encoding="utf-8"):
+            pass
+        try:
+            os.remove(probe_file)
+        except OSError:
+            warnings.append(f"Backup probe dosyasi silinemedi: {probe_file}")
+    except Exception as e:
+        errors.append(f"Backup dizinine erisim yok ({backup_dir}): {e}")
+
+    if not errors:
+        try:
+            adapter = get_db_adapter()
+            conn = adapter.connect()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            finally:
+                conn.close()
+        except Exception as e:
+            errors.append(f"Hedef veritabanina baglanilamadi: {e}")
+
+    return len(errors) == 0, errors, warnings
 
 
 def ensure_monitoring_table(conn):
@@ -778,12 +844,14 @@ def get_live_database_names() -> list[str]:
             pass
 
 
-def set_run_check_state(status: str, message: str = "", error: str = ""):
+def set_run_check_state(status: str, message: str = "", error: str = "", check_id: str | None = None):
     now_ts = int(time.time())
     with RUN_CHECK_STATE_LOCK:
         RUN_CHECK_STATE["status"] = status
         RUN_CHECK_STATE["message"] = message
         RUN_CHECK_STATE["error"] = error
+        if check_id is not None:
+            RUN_CHECK_STATE["check_id"] = check_id
         if status == "running":
             RUN_CHECK_STATE["started_at"] = now_ts
             RUN_CHECK_STATE["finished_at"] = None
@@ -796,8 +864,16 @@ def get_run_check_state():
         return dict(RUN_CHECK_STATE)
 
 
-def run_check_worker():
+def run_check_worker(check_id: str):
     try:
+        emit_log(
+            APP_LOGGER,
+            "INFO",
+            "RUN_CHECK_STARTED",
+            "Arka plan saglik kontrolu baslatildi",
+            correlation_id=check_id,
+        )
+
         child_env = os.environ.copy()
         child_env["PYTHONIOENCODING"] = "utf-8"
         child_env["PYTHONUTF8"] = "1"
@@ -814,15 +890,48 @@ def run_check_worker():
         )
         if proc.returncode != 0:
             err_text = (proc.stderr or proc.stdout or "Bilinmeyen hata").strip()
-            set_run_check_state("failed", error=f"Test calismadi: {err_text}")
+            set_run_check_state("failed", error=f"Test calismadi: {err_text}", check_id=check_id)
+            emit_log(
+                APP_LOGGER,
+                "ERROR",
+                "RUN_CHECK_FAILED",
+                "Arka plan saglik kontrolu hata ile bitti",
+                correlation_id=check_id,
+                context={"return_code": proc.returncode, "error": err_text[-400:]},
+            )
             return
 
         out_text = (proc.stdout or "Kontrol tamamlandi").strip()
-        set_run_check_state("completed", message=out_text[-600:])
+        set_run_check_state("completed", message=out_text[-600:], check_id=check_id)
+        emit_log(
+            APP_LOGGER,
+            "INFO",
+            "RUN_CHECK_COMPLETED",
+            "Arka plan saglik kontrolu tamamlandi",
+            correlation_id=check_id,
+            context={"output_tail": out_text[-200:]},
+        )
     except subprocess.TimeoutExpired:
-        set_run_check_state("failed", error="Test zaman asimina ugradi (180 sn)")
+        set_run_check_state("failed", error="Test zaman asimina ugradi (180 sn)", check_id=check_id)
+        emit_log(
+            APP_LOGGER,
+            "ERROR",
+            "RUN_CHECK_TIMEOUT",
+            "Arka plan saglik kontrolu zaman asimina ugradi",
+            correlation_id=check_id,
+            context={"timeout_sec": 180},
+        )
     except Exception as e:
-        set_run_check_state("failed", error=f"Beklenmeyen hata: {e}")
+        set_run_check_state("failed", error=f"Beklenmeyen hata: {e}", check_id=check_id)
+        emit_log(
+            APP_LOGGER,
+            "ERROR",
+            "RUN_CHECK_EXCEPTION",
+            "Arka plan saglik kontrolunde beklenmeyen hata",
+            correlation_id=check_id,
+            context={"error": str(e)},
+            exc_info=True,
+        )
     finally:
         RUN_TEST_LOCK.release()
 
@@ -1328,6 +1437,14 @@ def api_monitoring_databases():
         database_names = get_live_database_names()
     except Exception as e:
         warning = f"Canli veritabani listesi alinamadi: {e}"
+        emit_log(
+            APP_LOGGER,
+            "WARNING",
+            "LIVE_DB_LIST_FAILED",
+            "Canli veritabani listesi alinamadi",
+            correlation_id="api_monitoring_databases",
+            context={"error": str(e)},
+        )
         database_names = sorted(monitored_map.keys())
 
     payload = []
@@ -1355,8 +1472,17 @@ def api_run_check():
         state = get_run_check_state()
         return jsonify({"status": "running", "state": state}), 202
 
-    set_run_check_state("running", message="Test calistirildi")
-    thread = threading.Thread(target=run_check_worker, daemon=True)
+    check_id = make_correlation_id("chk")
+    set_run_check_state("running", message="Test calistirildi", check_id=check_id)
+    emit_log(
+        APP_LOGGER,
+        "INFO",
+        "RUN_CHECK_TRIGGERED",
+        "API uzerinden run-check tetiklendi",
+        correlation_id=check_id,
+    )
+
+    thread = threading.Thread(target=run_check_worker, args=(check_id,), daemon=True)
     thread.start()
     return jsonify({"status": "started", "state": get_run_check_state()}), 202
 
@@ -1674,7 +1800,52 @@ def api_wait_analysis():
 
 
 if __name__ == "__main__":
+    startup_correlation_id = "startup"
+
+    ok, preflight_errors, preflight_warnings = verify_startup()
+    for warning in preflight_warnings:
+        print(f"⚠️ PREFLIGHT UYARI: {warning}")
+        emit_log(
+            APP_LOGGER,
+            "WARNING",
+            "PREFLIGHT_WARNING",
+            warning,
+            correlation_id=startup_correlation_id,
+        )
+
+    if not ok:
+        print("❌ PREFLIGHT BASARISIZ. Flask baslatilmadi.")
+        emit_log(
+            APP_LOGGER,
+            "ERROR",
+            "PREFLIGHT_FAILED",
+            "PREFLIGHT BASARISIZ. Flask baslatilmadi.",
+            correlation_id=startup_correlation_id,
+            context={"error_count": len(preflight_errors)},
+        )
+        for err in preflight_errors:
+            print(f" - {err}")
+            emit_log(
+                APP_LOGGER,
+                "ERROR",
+                "PREFLIGHT_ERROR",
+                err,
+                correlation_id=startup_correlation_id,
+            )
+        raise SystemExit(1)
+
+    print("✅ PREFLIGHT OK. Flask baslatiliyor...")
     debug_mode = os.getenv("FLASK_DEBUG", "0") == "1"
     host = os.getenv("FLASK_HOST", "127.0.0.1")
     port = int(os.getenv("FLASK_PORT", "5050"))
+
+    emit_log(
+        APP_LOGGER,
+        "INFO",
+        "APP_START",
+        "Flask uygulamasi baslatiliyor",
+        correlation_id=startup_correlation_id,
+        context={"host": host, "port": port, "debug": debug_mode},
+    )
+
     app.run(debug=debug_mode, host=host, port=port)

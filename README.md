@@ -14,6 +14,7 @@ MSSQL sunucusunun sağlık durumunu otomatik olarak izleyen, skorlayan, modern b
 - [Gereksinimler](#gereksinimler)
 - [Kurulum](#kurulum)
 - [Yapılandırma (.env)](#yapılandırma-env)
+- [PostgreSQL Uzak Baglanti Kurulumu](#postgresql-uzak-baglanti-kurulumu)
 - [Kullanım](#kullanım)
 - [Telegram Bot Komutları](#telegram-bot-komutları)
 - [Sağlık Skoru Hesaplama](#sağlık-skoru-hesaplama)
@@ -165,6 +166,83 @@ DASHBOARD_PASS=guclu_sifre
 > Not: Geriye dönük uyumluluk için `TELEGRAM_ALERT_THRESHOLD` anahtarı da desteklenir.
 
 > ⚠️ `.env` dosyası `.gitignore` tarafından repo dışında tutulmaktadır. Asla commit etmeyin.
+
+---
+
+## PostgreSQL Uzak Baglanti Kurulumu
+
+Bu bolum, DBMonitor'un baska bir makinedeki PostgreSQL sunucusuna baglanmasi veya baska bir kullanicinin sisteme yeni PostgreSQL hedefi eklemesi icin referanstir.
+
+### 1. Sunucu tarafi minimum gereksinimler
+
+- `postgresql.conf` icinde `listen_addresses='*'` ve `port=5432` dogrula.
+- `pg_hba.conf` icinde DBMonitor makinesinin IP adresine izin ver.
+- PostgreSQL'de login kullanicisi olustur ve hedef veritabani icin `CONNECT` yetkisi ver.
+
+Ornek `pg_hba.conf` satiri (onerilen, dar kapsam):
+
+```conf
+host    all    dbmonitor_user    10.1.1.65/32    scram-sha-256
+```
+
+Notlar:
+- Buradaki IP, PostgreSQL sunucusunun degil DBMonitor'un calistigi istemci makinenin IP'si olmalidir.
+- Geniş subnet gerekiyorsa `/24` kullanilabilir, ancak guvenlik icin `/32` tercih edilir.
+
+### 2. Kullanici ve yetki komutlari
+
+```sql
+CREATE ROLE dbmonitor_user WITH LOGIN PASSWORD 'StrongPassword!';
+GRANT CONNECT ON DATABASE Deneme TO dbmonitor_user;
+GRANT CONNECT ON DATABASE postgres TO dbmonitor_user;
+GRANT pg_monitor TO dbmonitor_user;
+```
+
+Neden `postgres` veritabani icin de `CONNECT` veriliyor:
+- Uygulama bazi scheduler/istatistik kontrollerinde `postgres` veritabanina baglanabilir.
+
+### 3. Konfigu yeniden yukleme
+
+```sql
+SELECT pg_reload_conf();
+```
+
+Gerekirse PostgreSQL servisini restart edin.
+
+### 4. DBMonitor tarafi ayarlari
+
+Web arayuzunde veya `.env` icinde PostgreSQL hedefi icin su alanlari dogru doldurun:
+
+```env
+DB_ENGINE=postgresql
+DB_SERVER=10.20.2.23
+DB_PORT=5432
+DB_NAME=Deneme
+DB_USER=dbmonitor_user
+DB_PASSWORD=StrongPassword!
+```
+
+Profil bazli kullanimda su alanlar da desteklenir:
+
+```env
+ACTIVE_DB_ENGINE=postgresql
+POSTGRES_DB_SERVER=10.20.2.23
+POSTGRES_DB_PORT=5432
+POSTGRES_DB_NAME=Deneme
+POSTGRES_DB_USER=dbmonitor_user
+POSTGRES_DB_PASSWORD=StrongPassword!
+```
+
+### 5. Sik gorulen hata ve cozum
+
+- `no pg_hba.conf entry for host ...`
+    Cozum: `pg_hba.conf` icindeki ADDRESS alanina DBMonitor istemci IP'sini ekleyin.
+
+- `FATAL ... no encryption`
+    Cozum: Cogu durumda dogru `host ... scram-sha-256` satiri eklemek yeterlidir.
+
+- `utf-8 codec can't decode ...`
+    Cozum: Bu hata genellikle asıl PostgreSQL hata mesajinin kodlamasindan kaynaklanir. Once `pg_hba.conf`, kullanici/sifre ve yetkileri dogrulayin.
 
 ---
 

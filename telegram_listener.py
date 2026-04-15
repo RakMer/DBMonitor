@@ -24,19 +24,20 @@ Gereksinimler:
 
 import os
 import time
-import logging
 import subprocess
 import telebot
 import Test
 from datetime import datetime
 from dotenv import load_dotenv
 from db_adapters import MSSQLAdapter, PostgresAdapter, get_db_adapter
+from log_utils import emit_log, setup_process_logger
 
 # ============================================================
 # YAPILANDIRMA
 # ============================================================
 
 load_dotenv()
+logger = setup_process_logger("telegram")
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_IDS_RAW   = os.getenv("TELEGRAM_CHAT_IDS", "")
@@ -62,17 +63,6 @@ if IS_MSSQL:
     PROTECTED_DBS = {"master", "tempdb", "model", "msdb"}
 else:
     PROTECTED_DBS = {"postgres", "template0", "template1"}
-
-# ============================================================
-# LOGLAMA AYARLARI
-# ============================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("DBMonitorBot")
 
 # ============================================================
 # DOĞRULAMA
@@ -1018,6 +1008,15 @@ def cmd_unknown(message):
 # ============================================================
 
 if __name__ == "__main__":
+    emit_log(
+        logger,
+        "INFO",
+        "TELEGRAM_BOT_START",
+        "Telegram bot sureci baslatiliyor",
+        correlation_id="startup",
+        context={"engine": DB_ENGINE, "server": DB_SERVER, "authorized_chat_count": len(ALLOWED_CHAT_IDS)},
+    )
+
     logger.info("=" * 50)
     logger.info("🤖 DB Monitor Telegram Bot başlatılıyor...")
     logger.info(f"🧠 Motor: {DB_ENGINE}")

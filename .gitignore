@@ -18,3 +18,7 @@ __pycache__/
 # IDE dosyaları
 .vscode/
 .idea/
+
+# Runtime log dosyalari
+logs/
+*.log

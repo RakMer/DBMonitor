@@ -20,7 +20,7 @@ Ana dosyalar:
 - dbmonitor.sqlite3
 
 ## 2. Cekirdek Mimari
-Sistem 3 ana surec ve 1 paylasilan depodan olusur:
+Sistem 4 ana surec ve 1 paylasilan depodan olusur:
 
 1) Monitor motoru (Test.py)
 - `get_db_runtime()` ile aktif motoru (mssql/postgres) alir.
@@ -36,6 +36,8 @@ Sistem 3 ana surec ve 1 paylasilan depodan olusur:
 3) Web/API katmani (app.py)
 - Dashboard HTML render eder.
 - Ayar endpointlerini, run-check endpointlerini, kaynak ve wait analizi endpointlerini saglar.
+- Coklu baglanti hedeflerini SQLite'ta saklar ve aktif profile uygular.
+- Engine/profil gecisini `ACTIVE_DB_ENGINE`, `MSSQL_DB_*`, `POSTGRES_DB_*` anahtarlariyla yonetir.
 - Test.py dosyasini arka thread + subprocess ile tetikler.
 - `/api/monitoring-databases` canli DB listesini aktif motordan alir.
 
@@ -47,6 +49,7 @@ Sistem 3 ana surec ve 1 paylasilan depodan olusur:
 - HealthHistory
 - PenaltyLog
 - MonitoringConfig
+- ConnectionTargets
 - ResourceSnapshots
 - DatabaseResourceSnapshots
 - WaitSnapshots
@@ -110,6 +113,7 @@ Detaylar:
 
 - GET/POST /api/settings
   Esik ve ayarlari okur/gunceller.
+  DB hedefi guncellemelerinde once staged validation yapar, sonra profile + runtime anahtarlari yazar.
 
 - GET/POST /api/monitoring-databases
   Izlenecek DB secimlerini yonetir (aktif motora gore canli liste).
@@ -125,6 +129,21 @@ Detaylar:
 
 - GET /api/wait-analysis
   Wait tipi dagilimlari, trend ve blocking ozetini dondurur.
+
+- GET /api/connection-targets
+  Kayitli baglanti hedeflerini listeler.
+
+- POST /api/connection-targets/activate
+  Secilen hedefi aktif yapar ve .env profile/runtime alanlarini uygular.
+
+- GET /api/connection-targets/<target_id>
+  Tek hedefin detayini (duzenleme alanlari dahil) dondurur.
+
+- POST /api/connection-targets/update
+  Hedef bilgilerini gunceller; istenirse ayni anda aktif hale getirir.
+
+- POST /api/connection-targets/delete
+  Kayitli hedefi siler.
 
 ## 8. Telegram Komutlari (telegram_listener.py)
 Temel komutlar:
@@ -143,7 +162,7 @@ Guvenlik:
 - DB adi icin basit injection filtresi var.
 
 ## 9. .env Degiskenleri (Onemli Olanlar)
-Baglanti:
+Aktif runtime baglantisi:
 - DB_ENGINE (mssql|postgresql)
 - DB_SERVER
 - DB_PORT
@@ -151,6 +170,22 @@ Baglanti:
 - DB_USER
 - DB_PASSWORD
 - DB_DRIVER
+
+Profil bazli baglanti anahtarlari:
+- ACTIVE_DB_ENGINE
+- MSSQL_DB_SERVER
+- MSSQL_DB_PORT
+- MSSQL_DB_NAME
+- MSSQL_DB_USER
+- MSSQL_DB_PASSWORD
+- MSSQL_DB_DRIVER
+- POSTGRES_DB_SERVER
+- POSTGRES_DB_PORT
+- POSTGRES_DB_NAME
+- POSTGRES_DB_USER
+- POSTGRES_DB_PASSWORD
+- POSTGRES_DOCKER_CONTAINER
+- PG_DUMP_BIN (alias: PG_DUMP)
 
 Alarm ve esikler:
 - TELEGRAM_THRESHOLD (alias: TELEGRAM_ALERT_THRESHOLD)
@@ -177,6 +212,7 @@ Davranis flagleri:
 
 PostgreSQL container fallback:
 - POSTGRES_DOCKER_CONTAINER
+- PG_DUMP_BIN (alias: PG_DUMP)
 
 Telegram:
 - TELEGRAM_TOKEN
@@ -190,10 +226,13 @@ Flask:
 - FLASK_COOKIE_SECURE
 
 ## 10. Bilinen Riskler / Dikkat Noktalari
-1. Docker log tabanli failed-login sayisi stress test sonrasi sisik kalabilir.
-2. Disk metrikleri host-container topolojisine bagimli; fallback olmasa None gelebilir.
-3. Telegram mesajlari parse_mode=HTML kullaniyor; dinamik metinler escape edilmezse parse hatasi riski olur.
-4. SQLite tablo/kolon adlari migration olmadan degistirilmemeli.
+1. `.env` icinde tekrar eden `DB_*` bloklari profile/runtime secimini karistirabilir; profile anahtarlarina agirlik verilmeli.
+2. PostgreSQL uzak baglantida en sik kirilma noktasi `pg_hba.conf` ADDRESS uyusmazligidir (istemci IP dogru olmali).
+3. PostgreSQL hata metni UTF-8 disi locale ile gelirse istemci tarafinda `utf-8 codec` hatasi gorulebilir; once auth/pg_hba kok nedeni kontrol edilmeli.
+4. Docker log tabanli failed-login sayisi stress test sonrasi sisik kalabilir.
+5. Disk metrikleri host-container topolojisine bagimli; fallback olmasa `None` gelebilir.
+6. Telegram mesajlari `parse_mode=HTML` kullaniyor; dinamik metinler escape edilmezse parse hatasi riski olur.
+7. SQLite tablo/kolon adlari migration olmadan degistirilmemeli.
 
 ## 11. Son Donem Davranis Degisiklikleri
 - Adapter/strategy yapisi ile Postgres destegi genisletildi.
@@ -203,6 +242,12 @@ Flask:
 - Failed login icin Docker logs fallback eklendi.
 - pg_cron/pgAgent job kontrolleri eklendi.
 - Query analizinde noise filtre + birlesik esik + QID kimligi eklendi.
+- `.env` icin profile tabanli engine gecisi eklendi (`ACTIVE_DB_ENGINE`, `MSSQL_DB_*`, `POSTGRES_DB_*`).
+- `/api/settings` tarafinda DB hedef guncellemeleri staged validate + atomik persist akisina alindi.
+- `ConnectionTargets` tablosu ve hedef listeleme/aktif etme/duzenleme/silme endpointleri eklendi.
+- Dashboard'da kayitli hedef secimi + duzenle/sil paneli eklendi; otomatik yenileme 60 sn -> 300 sn yapildi.
+- Telegram PostgreSQL yedek akisi iyilestirildi: `NoneType.close` hatasi giderildi, Docker `pg_dump` ve `PG_DUMP` alias destegi eklendi.
+- README'ye PostgreSQL uzak baglanti kurulumu ve sik hata cozumleri eklendi.
 
 ## 12. Calistirma Komutlari
 - python app.py
@@ -221,7 +266,14 @@ Flask:
 - Query QID bilgisini dashboard/API'ye acik alan olarak tasimak.
 - Blocking analizine wait event/type ve blocker query ozeti eklemek.
 - Alarm ack/runbook mekanizmasi eklemek.
-- Coklu sunucu/profil bazli izleme.
-- Test coverage arttirma.
+- Lokal v1 stabilizasyonu icin preflight checks + smoke test akisi olusturmak.
+- SQLite WAL/busy-timeout iyilestirmeleri ile eszamanli yazma dayanikliligini arttirmak.
+- Test coverage arttirma (en az API smoke + DB adapter baglanti testleri).
+
+## 15. Guncel Durum (2026-04-15)
+- Coklu sunucu/profil bazli gecis altyapisi backend ve frontend tarafinda aktif durumda.
+- PostgreSQL uzak baglanti sorunlarinda dogru `pg_hba.conf` istemci IP eslesmesi kritik bulgu olarak dogrulandi.
+- Lokal ortamda birincil hedef: v1 stabilizasyon (konfig hijyeni, preflight, smoke test, operasyonel runbook).
+- Sonraki faz hedefi: uzak sunucuda ayni stabilite kriterleriyle v1 roll-out.
 
 Bu dosya, repo anlik durumunu teknik devralma odakli ozetler.

@@ -1,4 +1,3 @@
-import sqlite3
 import os
 import requests
 import app
@@ -11,25 +10,29 @@ from datetime import datetime
 import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 from db_adapters import get_db_runtime
+from db_utils import get_sqlite_conn
+from log_utils import emit_log, make_correlation_id, setup_process_logger
 
 
 # .env dosyasından bağlantı bilgilerini yükle
 load_dotenv()
 
-# DB_ENGINE degerine gore adapter secilir (varsayilan: mssql).
-# Bu sayede baglanti katmani, izleme mantigindan ayristirilmis olur.
-try:
-    db_adapter, health_strategy = get_db_runtime()
-except Exception as e:
-    raise ValueError(f"❌ Veritabani adapteri baslatilamadi: {e}") from e
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SQLITE_PATH = os.path.join(BASE_DIR, "dbmonitor.sqlite3")
+TEST_LOGGER = setup_process_logger("test")
+CURRENT_CHECK_ID = "-"
+
+# Runtime baglanti baglami script baslangicinda hazirlanir.
+db_adapter = None
+health_strategy = None
 
 # Geriye donuk uyumluluk icin mevcut degisken adlarini koruyoruz.
-DB_ENGINE = health_strategy.engine_name
-server = db_adapter.server
-database = db_adapter.database
-username = db_adapter.username
-password = db_adapter.password
-conn_str = db_adapter.get_connection_string()
+DB_ENGINE = "unknown"
+server = ""
+database = ""
+username = ""
+password = ""
+conn_str = ""
 
 TELEGRAM_THRESHOLD     = int(os.getenv("TELEGRAM_THRESHOLD") or os.getenv("TELEGRAM_ALERT_THRESHOLD") or 70)
 DISK_WARN_PCT          = float(os.getenv('DISK_WARN_PCT', 80))
@@ -47,7 +50,7 @@ QUERY_ANALYSIS_TOP_N   = int(os.getenv('QUERY_ANALYSIS_TOP_N', 5))
 QUERY_MIN_CALLS        = int(os.getenv('QUERY_MIN_CALLS', 2))
 QUERY_AVG_SEC          = float(os.getenv('QUERY_AVG_SEC', LONG_QUERY_SEC))
 QUERY_TOTAL_SEC        = float(os.getenv('QUERY_TOTAL_SEC', max(LONG_QUERY_SEC * QUERY_MIN_CALLS, LONG_QUERY_SEC)))
-SYSTEM_DATABASES       = {name.lower() for name in db_adapter.get_system_databases()}
+SYSTEM_DATABASES       = set()
 
 SQL_AGENT_PENALTY      = int(os.getenv('SQL_AGENT_PENALTY', 30))
 OFFLINE_DB_PENALTY     = int(os.getenv('OFFLINE_DB_PENALTY', 20))
@@ -108,6 +111,121 @@ CHECK_SYSTEM_DB_BACKUP = parse_bool_env('CHECK_SYSTEM_DB_BACKUP', True)
 CHECK_SYSTEM_DB_AUTOGROWTH = parse_bool_env('CHECK_SYSTEM_DB_AUTOGROWTH', True)
 CHECK_SYSTEM_DB_INDEX = parse_bool_env('CHECK_SYSTEM_DB_INDEX', False)
 BACKUP_CHECK_REQUIRED = parse_bool_env('BACKUP_CHECK_REQUIRED', True)
+
+
+def log_test_event(
+    level: str,
+    event_code: str,
+    message: str,
+    check_id: str | None = None,
+    context: dict | None = None,
+    exc_info: bool = False,
+):
+    emit_log(
+        TEST_LOGGER,
+        level,
+        event_code,
+        message,
+        correlation_id=check_id or CURRENT_CHECK_ID,
+        context=context,
+        exc_info=exc_info,
+    )
+
+
+def update_current_check_id(check_id: str):
+    global CURRENT_CHECK_ID
+    CURRENT_CHECK_ID = check_id
+
+
+def initialize_runtime_context(force_reload: bool = False):
+    global db_adapter
+    global health_strategy
+    global DB_ENGINE
+    global server
+    global database
+    global username
+    global password
+    global conn_str
+    global SYSTEM_DATABASES
+
+    if db_adapter is not None and health_strategy is not None and not force_reload:
+        return db_adapter, health_strategy
+
+    adapter, strategy = get_db_runtime()
+    db_adapter = adapter
+    health_strategy = strategy
+
+    DB_ENGINE = health_strategy.engine_name
+    server = db_adapter.server
+    database = db_adapter.database
+    username = db_adapter.username
+    password = db_adapter.password
+    conn_str = db_adapter.get_connection_string()
+    SYSTEM_DATABASES = {name.lower() for name in db_adapter.get_system_databases()}
+
+    return db_adapter, health_strategy
+
+
+def _resolve_backup_dir() -> str:
+    configured = str(os.getenv("BACKUP_DIR") or "").strip()
+    if configured:
+        return configured
+    return os.path.join(BASE_DIR, "Backups")
+
+
+def verify_startup() -> tuple[bool, list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    required_vars = ["DB_ENGINE", "DB_SERVER", "DB_NAME", "DB_USER", "DB_PASSWORD"]
+    for var_name in required_vars:
+        if not str(os.getenv(var_name) or "").strip():
+            errors.append(f".env icinde {var_name} eksik")
+
+    engine = str(os.getenv("DB_ENGINE") or "").strip().lower()
+    if engine in {"mssql", "sqlserver", "sql_server"} and not str(os.getenv("DB_DRIVER") or "").strip():
+        errors.append(".env icinde DB_DRIVER eksik (MSSQL icin zorunlu)")
+
+    sqlite_dir = os.path.dirname(SQLITE_PATH) or BASE_DIR
+    try:
+        os.makedirs(sqlite_dir, exist_ok=True)
+        with open(SQLITE_PATH, "a", encoding="utf-8"):
+            pass
+        sqlite_conn = get_sqlite_conn(SQLITE_PATH, timeout=10)
+        try:
+            sqlite_conn.execute("PRAGMA user_version")
+        finally:
+            sqlite_conn.close()
+    except Exception as e:
+        errors.append(f"SQLite dosyasina yazma/erisim hatasi: {e}")
+
+    backup_dir = _resolve_backup_dir()
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        probe_file = os.path.join(backup_dir, ".dbmonitor_write_probe")
+        with open(probe_file, "a", encoding="utf-8"):
+            pass
+        try:
+            os.remove(probe_file)
+        except OSError:
+            warnings.append(f"Backup probe dosyasi silinemedi: {probe_file}")
+    except Exception as e:
+        errors.append(f"Backup dizinine erisim yok ({backup_dir}): {e}")
+
+    if not errors:
+        try:
+            adapter, _strategy = get_db_runtime()
+            conn = adapter.connect()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            finally:
+                conn.close()
+        except Exception as e:
+            errors.append(f"Hedef veritabanina baglanilamadi: {e}")
+
+    return len(errors) == 0, errors, warnings
 
 
 def sanitize_sql_text(text: str | None, max_len: int = 140) -> str:
@@ -224,6 +342,12 @@ def send_telegram_alert(score, penalties):
     chat_ids = os.getenv('TELEGRAM_CHAT_IDS', '')
     if not token or not chat_ids:
         print("⚠️  Telegram bilgileri .env dosyasında eksik, bildirim atlandı.")
+        log_test_event(
+            "WARNING",
+            "TELEGRAM_CONFIG_MISSING",
+            "Telegram bilgileri eksik oldugu icin bildirim atlandi",
+            context={"token_exists": bool(token), "chat_ids_exists": bool(chat_ids)},
+        )
         return
 
     recipients = [cid.strip() for cid in chat_ids.split(',') if cid.strip()]
@@ -254,14 +378,33 @@ def send_telegram_alert(score, penalties):
             resp = requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"}, timeout=10)
             if resp.ok:
                 print(f"📨 Telegram bildirimi gönderildi! → chat_id: {chat_id} (Skor: {score})")
+                log_test_event(
+                    "INFO",
+                    "TELEGRAM_ALERT_SENT",
+                    "Telegram alarm bildirimi gonderildi",
+                    context={"chat_id": chat_id, "score": score},
+                )
             else:
                 print(f"⚠️  Telegram gönderimi başarısız (chat_id: {chat_id}): {resp.text}")
+                log_test_event(
+                    "WARNING",
+                    "TELEGRAM_ALERT_HTTP_FAIL",
+                    "Telegram alarm bildirimi basarisiz dondu",
+                    context={"chat_id": chat_id, "status_code": resp.status_code, "response": resp.text[-300:]},
+                )
         except Exception as e:
             print(f"⚠️  Telegram hatası (chat_id: {chat_id}): {e}")
+            log_test_event(
+                "ERROR",
+                "TELEGRAM_ALERT_EXCEPTION",
+                "Telegram alarm bildirimi gonderilirken hata olustu",
+                context={"chat_id": chat_id, "error": str(e)},
+                exc_info=True,
+            )
 
 # --- SQLITE VERİTABANI KURULUMU ---
 def init_sqlite_db():
-    conn = sqlite3.connect('dbmonitor.sqlite3')
+    conn = get_sqlite_conn(SQLITE_PATH)
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -346,7 +489,7 @@ def init_sqlite_db():
 
 
 def load_monitored_databases():
-    conn = sqlite3.connect('dbmonitor.sqlite3')
+    conn = get_sqlite_conn(SQLITE_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT db_name, is_monitored FROM MonitoringConfig")
     rows = cursor.fetchall()
@@ -733,7 +876,7 @@ def collect_wait_metrics(cursor):
 
 
 def save_wait_metrics(wait_snapshot):
-    conn = sqlite3.connect('dbmonitor.sqlite3')
+    conn = get_sqlite_conn(SQLITE_PATH)
     cursor = conn.cursor()
 
     for row in wait_snapshot.get("cumulative_waits", []):
@@ -1031,7 +1174,7 @@ def check_index_fragmentation(cursor, monitored_databases, strategy):
 
 
 def save_resource_metrics(snapshot):
-    conn = sqlite3.connect('dbmonitor.sqlite3')
+    conn = get_sqlite_conn(SQLITE_PATH)
     cursor = conn.cursor()
 
     cursor.execute(
@@ -1079,7 +1222,7 @@ def save_resource_metrics(snapshot):
 
 # --- VERİLERİ SQLITE'A KAYDETME FONKSİYONU ---
 def save_to_sqlite(score, penalties):
-    conn = sqlite3.connect('dbmonitor.sqlite3')
+    conn = get_sqlite_conn(SQLITE_PATH)
     cursor = conn.cursor()
     
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1093,9 +1236,40 @@ def save_to_sqlite(score, penalties):
     conn.commit()
     conn.close()
     print(f"\n💾 Geçmiş Kaydedildi! SQLite -> Tarih: {now} | Skor: {score}")
+    log_test_event(
+        "INFO",
+        "HEALTH_SCORE_PERSISTED",
+        "Saglik skoru SQLite'a yazildi",
+        context={"score": score, "penalty_count": len(penalties), "check_time": now},
+    )
 
 # --- ANA KONTROL FONKSİYONU ---
 def run_health_check_with_score():
+    check_id = make_correlation_id("chk")
+    update_current_check_id(check_id)
+
+    log_test_event(
+        "INFO",
+        "CHECK_STARTED",
+        "Saglik kontrolu basladi",
+        check_id=check_id,
+        context={"engine": DB_ENGINE, "server": server or "unknown"},
+    )
+
+    try:
+        initialize_runtime_context()
+    except Exception as runtime_err:
+        print(f"❌ KRITIK HATA: Runtime baslatilamadi: {runtime_err}")
+        log_test_event(
+            "ERROR",
+            "RUNTIME_INIT_FAILED",
+            "Runtime baslatilamadi",
+            check_id=check_id,
+            context={"error": str(runtime_err)},
+            exc_info=True,
+        )
+        return
+
     health_score = 100
     penalties = []
     
@@ -1539,6 +1713,13 @@ def run_health_check_with_score():
 
         print("=" * 50)
         print(f"🏆 GÜNCEL SUNUCU SAĞLIK SKORU: {health_score} / 100")
+        log_test_event(
+            "INFO",
+            "CHECK_FINISHED",
+            "Saglik kontrolu tamamlandi",
+            check_id=check_id,
+            context={"score": health_score, "penalty_count": len(penalties)},
+        )
         
         save_to_sqlite(health_score, penalties)
 
@@ -1572,6 +1753,67 @@ def run_health_check_with_score():
         
     except Exception as e:
         print(f"❌ Hata Oluştu: {e}")
+        log_test_event(
+            "ERROR",
+            "CHECK_EXCEPTION",
+            "Saglik kontrolu calisirken beklenmeyen hata olustu",
+            check_id=check_id,
+            context={"error": str(e)},
+            exc_info=True,
+        )
 
 if __name__ == "__main__":
+    startup_correlation_id = "startup"
+
+    ok, preflight_errors, preflight_warnings = verify_startup()
+    for warning in preflight_warnings:
+        print(f"⚠️ PREFLIGHT UYARI: {warning}")
+        log_test_event(
+            "WARNING",
+            "PREFLIGHT_WARNING",
+            warning,
+            check_id=startup_correlation_id,
+        )
+
+    if not ok:
+        print("❌ PREFLIGHT BASARISIZ. Test calistirilmadi.")
+        log_test_event(
+            "ERROR",
+            "PREFLIGHT_FAILED",
+            "PREFLIGHT BASARISIZ. Test calistirilmadi.",
+            check_id=startup_correlation_id,
+            context={"error_count": len(preflight_errors)},
+        )
+        for err in preflight_errors:
+            print(f" - {err}")
+            log_test_event(
+                "ERROR",
+                "PREFLIGHT_ERROR",
+                err,
+                check_id=startup_correlation_id,
+            )
+        raise SystemExit(1)
+
+    try:
+        initialize_runtime_context(force_reload=True)
+    except Exception as runtime_err:
+        print(f"❌ KRITIK HATA: Runtime baslatilamadi: {runtime_err}")
+        log_test_event(
+            "ERROR",
+            "RUNTIME_INIT_FAILED",
+            "Runtime baslatilamadi",
+            check_id=startup_correlation_id,
+            context={"error": str(runtime_err)},
+            exc_info=True,
+        )
+        raise SystemExit(1)
+
+    print("✅ PREFLIGHT OK. Test baslatiliyor...")
+    log_test_event(
+        "INFO",
+        "TEST_START",
+        "Test sureci baslatiliyor",
+        check_id=startup_correlation_id,
+        context={"engine": DB_ENGINE, "server": server or "unknown"},
+    )
     run_health_check_with_score()
