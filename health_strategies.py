@@ -51,6 +51,48 @@ PG_AUTH_FAILURE_PATTERNS = (
 )
 
 
+def _parse_optional_bool_env(*names: str) -> bool | None:
+    """Parse optional boolean env values.
+
+    Returns:
+    - True/False when a supported value exists.
+    - None when variable is missing or invalid.
+    """
+    true_values = {"1", "true", "yes", "on"}
+    false_values = {"0", "false", "no", "off"}
+
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+
+        normalized = str(raw).strip().lower()
+        if normalized in true_values:
+            return True
+        if normalized in false_values:
+            return False
+
+    return None
+
+
+def _get_postgres_docker_container() -> str:
+    """Resolve Docker container name based on explicit docker/local mode.
+
+    POSTGRES_DOCKER / POSTGRES_USE_DOCKER:
+    - 1/true/on  => Docker mode enabled
+    - 0/false/off => Local mode forced
+    - missing      => backward-compatible auto mode (container var decides)
+    """
+    container = (os.getenv("POSTGRES_DOCKER_CONTAINER") or "").strip()
+    docker_mode = _parse_optional_bool_env("POSTGRES_DOCKER", "POSTGRES_USE_DOCKER")
+
+    if docker_mode is None:
+        return container
+    if docker_mode is False:
+        return ""
+    return container
+
+
 def _normalize_backup_token(value: str) -> str:
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
@@ -630,6 +672,40 @@ class HealthCheckStrategy(ABC):
     def get_log_space_usage(self, cursor) -> list[dict[str, object]] | None:
         """Return log usage rows as [{'db_name': str, 'used_pct': float}], or None."""
 
+    def get_connection_utilization(self, cursor) -> dict[str, object] | None:
+        """Return connection utilization metrics, or None if unsupported.
+
+        Expected keys:
+        - max_connections: int
+        - effective_max_connections: int
+        - active_connections: int
+        - utilization_pct: float
+        """
+        return None
+
+    def get_replication_status(self, cursor) -> list[dict[str, object]] | None:
+        """Return replication health rows, or None if unsupported.
+
+        Expected keys per row:
+        - target: str
+        - state: str
+        - lag_seconds: float
+        - role: str
+        """
+        return None
+
+    def get_long_transactions(self, cursor, min_age_seconds: int) -> list[dict[str, object]] | None:
+        """Return long-running transaction rows, or None if unsupported.
+
+        Expected keys per row:
+        - pid: int
+        - db_name: str
+        - state: str
+        - age_seconds: float
+        - query_text: str
+        """
+        return None
+
 
 class MSSQLHealthStrategy(HealthCheckStrategy):
     """MSSQL implementation that keeps existing T-SQL checks intact."""
@@ -921,6 +997,134 @@ class PostgresHealthStrategy(HealthCheckStrategy):
     def get_agent_status(self, cursor) -> str | None:
         return None
 
+    def get_connection_utilization(self, cursor) -> dict[str, object] | None:
+        cursor.execute(
+            """
+            SELECT
+                current_setting('max_connections')::INT AS max_connections,
+                COALESCE(current_setting('superuser_reserved_connections', true), '3')::INT AS reserved_connections,
+                COUNT(*) FILTER (WHERE backend_type = 'client backend')::INT AS active_client_connections
+            FROM pg_stat_activity
+            """
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+
+        max_connections = int(row[0] or 0)
+        reserved_connections = max(0, int(row[1] or 0))
+        active_connections = int(row[2] or 0)
+
+        effective_max = max(1, max_connections - reserved_connections)
+        utilization_pct = (float(active_connections) / float(effective_max)) * 100.0
+
+        return {
+            "max_connections": max_connections,
+            "reserved_connections": reserved_connections,
+            "effective_max_connections": effective_max,
+            "active_connections": active_connections,
+            "utilization_pct": utilization_pct,
+        }
+
+    def get_replication_status(self, cursor) -> list[dict[str, object]] | None:
+        try:
+            cursor.execute("SELECT pg_is_in_recovery()")
+            row = cursor.fetchone()
+            is_standby = bool(row and row[0])
+        except Exception:
+            return None
+
+        rows_out: list[dict[str, object]] = []
+
+        if is_standby:
+            try:
+                cursor.execute(
+                    """
+                    SELECT
+                        EXTRACT(EPOCH FROM (clock_timestamp() - COALESCE(pg_last_xact_replay_timestamp(), clock_timestamp())))
+                    """
+                )
+                lag_row = cursor.fetchone()
+                lag_seconds = float(lag_row[0] or 0) if lag_row else 0.0
+            except Exception:
+                lag_seconds = 0.0
+
+            rows_out.append(
+                {
+                    "target": "standby_local",
+                    "state": "recovery",
+                    "lag_seconds": max(0.0, lag_seconds),
+                    "role": "standby",
+                }
+            )
+            return rows_out
+
+        try:
+            cursor.execute(
+                """
+                SELECT
+                    COALESCE(application_name, 'unknown') AS target,
+                    COALESCE(state, 'unknown') AS state,
+                    EXTRACT(
+                        EPOCH FROM GREATEST(
+                            COALESCE(write_lag, INTERVAL '0 second'),
+                            COALESCE(flush_lag, INTERVAL '0 second'),
+                            COALESCE(replay_lag, INTERVAL '0 second')
+                        )
+                    ) AS lag_seconds
+                FROM pg_stat_replication
+                """
+            )
+        except Exception:
+            return None
+
+        for target, state, lag_seconds in cursor.fetchall():
+            rows_out.append(
+                {
+                    "target": str(target or "unknown"),
+                    "state": str(state or "unknown"),
+                    "lag_seconds": float(lag_seconds or 0),
+                    "role": "primary",
+                }
+            )
+
+        return rows_out
+
+    def get_long_transactions(self, cursor, min_age_seconds: int) -> list[dict[str, object]] | None:
+        safe_age = max(1, int(min_age_seconds))
+
+        cursor.execute(
+            """
+            SELECT
+                pid,
+                COALESCE(datname, current_database()) AS db_name,
+                COALESCE(state, 'unknown') AS state,
+                EXTRACT(EPOCH FROM (clock_timestamp() - xact_start)) AS age_seconds,
+                COALESCE(query, '') AS query_text
+            FROM pg_stat_activity
+            WHERE pid <> pg_backend_pid()
+              AND xact_start IS NOT NULL
+              AND (clock_timestamp() - xact_start) >= (%s * INTERVAL '1 second')
+            ORDER BY age_seconds DESC
+            LIMIT 25
+            """,
+            (safe_age,),
+        )
+
+        rows_out = []
+        for pid, db_name, state, age_seconds, query_text in cursor.fetchall():
+            rows_out.append(
+                {
+                    "pid": int(pid or 0),
+                    "db_name": str(db_name or "unknown"),
+                    "state": str(state or "unknown"),
+                    "age_seconds": float(age_seconds or 0),
+                    "query_text": str(query_text or ""),
+                }
+            )
+
+        return rows_out
+
     def get_offline_databases(self, cursor) -> list[tuple[str, str]]:
         cursor.execute(
             """
@@ -1103,7 +1307,7 @@ class PostgresHealthStrategy(HealthCheckStrategy):
         if rows:
             return rows
 
-        docker_container = (os.getenv("POSTGRES_DOCKER_CONTAINER") or "").strip()
+        docker_container = _get_postgres_docker_container()
         if docker_container:
             docker_rows: list[dict[str, object]] = []
             for path in candidate_paths:
@@ -1327,7 +1531,7 @@ class PostgresHealthStrategy(HealthCheckStrategy):
             if file_based_count is not None:
                 return file_based_count
 
-        docker_container = (os.getenv("POSTGRES_DOCKER_CONTAINER") or "").strip()
+        docker_container = _get_postgres_docker_container()
         return _count_auth_failures_from_docker_logs(docker_container, window_hours)
 
     def get_failed_jobs(self, cursor) -> list[str] | None:
@@ -1604,7 +1808,7 @@ class PostgresHealthStrategy(HealthCheckStrategy):
         if rows:
             return rows
 
-        docker_container = (os.getenv("POSTGRES_DOCKER_CONTAINER") or "").strip()
+        docker_container = _get_postgres_docker_container()
         if docker_container:
             for path in candidate_paths:
                 free_pct = _get_free_pct_from_docker_path(docker_container, path)
@@ -1645,12 +1849,5 @@ class PostgresHealthStrategy(HealthCheckStrategy):
         if wal_bytes is None:
             return None
 
-        try:
-            cursor.execute("SELECT current_database()")
-            db_row = cursor.fetchone()
-            db_name = str(db_row[0]) if db_row and db_row[0] else "postgres"
-        except Exception:
-            db_name = "postgres"
-
         used_pct = (float(wal_bytes) / float(max_wal_bytes)) * 100.0
-        return [{"db_name": db_name, "used_pct": used_pct}]
+        return [{"db_name": "__cluster__", "scope": "cluster", "used_pct": used_pct}]

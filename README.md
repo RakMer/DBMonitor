@@ -152,6 +152,9 @@ TELEGRAM_TOKEN=<BotFather'dan alınan token>
 TELEGRAM_CHAT_IDS=111111111,222222222   # Virgülle ayrılmış yetkili Chat ID'ler
 TELEGRAM_THRESHOLD=70                   # Bu skorun altına düşünce bildirim gönderilir
 BACKUP_DIR=C:\\Backups                 # /takebackup için yedeklerin yazılacağı klasör (opsiyonel, yoksa C:\Backups kullanılır)
+POSTGRES_DOCKER=0                       # 1: Docker mode (docker exec/logs), 0: Local mode
+POSTGRES_DOCKER_CONTAINER=myPostgres    # POSTGRES_DOCKER=1 ise zorunlu
+PG_DUMP_BIN=pg_dump                     # Opsiyonel: pg_dump binary yolu
 BACKUP_MAX_AGE_HOURS=24                 # Yedek kontrolü için maksimum yaş (saat)
 DISK_WARN_PCT=80                        # Disk doluluk uyarı eşiği (%)
 DISK_CRIT_PCT=90                        # Disk doluluk kritik eşiği (%)
@@ -166,6 +169,8 @@ DASHBOARD_PASS=guclu_sifre
 ```
 
 > Not: Geriye dönük uyumluluk için `TELEGRAM_ALERT_THRESHOLD` anahtarı da desteklenir.
+
+> Not: `POSTGRES_DOCKER` ile mod secimi yapabilirsiniz. `1` oldugunda Docker container uzerinden calisir, `0` oldugunda host/local araclari kullanilir. Ayni davranis icin `POSTGRES_USE_DOCKER` da desteklenir.
 
 > ⚠️ `.env` dosyası `.gitignore` tarafından repo dışında tutulmaktadır. Asla commit etmeyin.
 
@@ -222,6 +227,8 @@ DB_PORT=5432
 DB_NAME=Deneme
 DB_USER=dbmonitor_user
 DB_PASSWORD=StrongPassword!
+POSTGRES_DOCKER=0
+POSTGRES_DOCKER_CONTAINER=
 ```
 
 Profil bazli kullanimda su alanlar da desteklenir:

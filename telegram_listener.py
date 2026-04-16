@@ -145,6 +145,46 @@ def get_postgres_admin_database(target_db: str) -> str:
     return "postgres"
 
 
+def parse_optional_bool_env(*names: str) -> bool | None:
+    """Parse optional boolean env values.
+
+    Returns True/False for supported values, None for missing/invalid values.
+    """
+    true_values = {"1", "true", "yes", "on"}
+    false_values = {"0", "false", "no", "off"}
+
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+
+        normalized = str(raw).strip().lower()
+        if normalized in true_values:
+            return True
+        if normalized in false_values:
+            return False
+
+    return None
+
+
+def get_postgres_docker_container() -> str:
+    """Resolve docker container according to explicit docker/local mode.
+
+    POSTGRES_DOCKER / POSTGRES_USE_DOCKER:
+    - 1/true/on  => docker mode enabled
+    - 0/false/off => local mode forced
+    - missing      => auto mode (container value decides)
+    """
+    container = (os.getenv("POSTGRES_DOCKER_CONTAINER") or "").strip()
+    docker_mode = parse_optional_bool_env("POSTGRES_DOCKER", "POSTGRES_USE_DOCKER")
+
+    if docker_mode is None:
+        return container
+    if docker_mode is False:
+        return ""
+    return container
+
+
 def validate_db_name(db_name: str) -> str | None:
     """
     Veritabanı adını doğrular.
@@ -697,7 +737,7 @@ def take_backup(message):
     try:
         zaman = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_suffix = "full" if backup_type == "full" else "diff"
-        postgres_docker_container = (os.getenv("POSTGRES_DOCKER_CONTAINER") or "").strip() if IS_POSTGRES else ""
+        postgres_docker_container = get_postgres_docker_container() if IS_POSTGRES else ""
         pg_dump_bin = (os.getenv("PG_DUMP_BIN") or os.getenv("PG_DUMP") or "pg_dump").strip() or "pg_dump"
         backup_ext = ".bak" if IS_MSSQL else (".sql" if postgres_docker_container else ".backup")
         backup_yolu = os.path.join(backup_dir, f"{db_name}_{backup_suffix}_{zaman}{backup_ext}")
@@ -730,6 +770,13 @@ def take_backup(message):
             if conn:
                 conn.close()
             timeout_sec = max(30, int(os.getenv("PG_BACKUP_TIMEOUT_SEC", "600")))
+            docker_mode = parse_optional_bool_env("POSTGRES_DOCKER", "POSTGRES_USE_DOCKER")
+
+            if docker_mode is True and not postgres_docker_container:
+                raise RuntimeError(
+                    "POSTGRES_DOCKER=1 ama POSTGRES_DOCKER_CONTAINER bos. "
+                    "Docker modu icin container adini da tanimlayin."
+                )
 
             if postgres_docker_container:
                 cmd = ["docker", "exec", "-i"]

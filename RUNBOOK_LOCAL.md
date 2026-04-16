@@ -44,7 +44,7 @@ Adimlar:
 1. `.env` dogrula:
 
 ```bash
-grep -E '^(DB_ENGINE|DB_SERVER|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD|DB_DRIVER|POSTGRES_DOCKER_CONTAINER|PG_DUMP_BIN)=' .env
+grep -E '^(DB_ENGINE|DB_SERVER|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD|DB_DRIVER|POSTGRES_DOCKER|POSTGRES_USE_DOCKER|POSTGRES_DOCKER_CONTAINER|PG_DUMP_BIN)=' .env
 ```
 
 2. MSSQL ise ODBC driver var mi bak:
@@ -202,7 +202,8 @@ docker exec <container_name> pg_dump --version
 ```
 
 Not:
-- `.env` icinde `POSTGRES_DOCKER_CONTAINER` degeri dogru olmali.
+- `.env` icinde `POSTGRES_DOCKER=1` ise `POSTGRES_DOCKER_CONTAINER` degeri zorunludur.
+- Local mod icin `POSTGRES_DOCKER=0` kullanin.
 - Host binary kullaniliyorsa `PG_DUMP_BIN` yolunu net ver.
 
 ## 5) Kisa Karar Agaci

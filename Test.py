@@ -71,6 +71,17 @@ AUTO_GROWTH_PENALTY    = int(os.getenv('AUTO_GROWTH_PENALTY', 10))
 LOG_SPACE_PENALTY      = int(os.getenv('LOG_SPACE_PENALTY', 30))
 BACKUP_UNSUPPORTED_PENALTY = int(os.getenv('BACKUP_UNSUPPORTED_PENALTY', 15))
 
+PG_CONN_WARN_PCT       = float(os.getenv('PG_CONN_WARN_PCT', 80))
+PG_CONN_CRIT_PCT       = float(os.getenv('PG_CONN_CRIT_PCT', 92))
+PG_CONN_WARN_PENALTY   = int(os.getenv('PG_CONN_WARN_PENALTY', 8))
+PG_CONN_CRIT_PENALTY   = int(os.getenv('PG_CONN_CRIT_PENALTY', 18))
+PG_REPL_LAG_WARN_SEC   = float(os.getenv('PG_REPL_LAG_WARN_SEC', 30))
+PG_REPL_LAG_CRIT_SEC   = float(os.getenv('PG_REPL_LAG_CRIT_SEC', 120))
+PG_REPL_LAG_PENALTY    = int(os.getenv('PG_REPL_LAG_PENALTY', 12))
+PG_LONG_TX_SEC         = float(os.getenv('PG_LONG_TX_SEC', 300))
+PG_LONG_TX_PENALTY     = int(os.getenv('PG_LONG_TX_PENALTY', 8))
+PG_LONG_TX_MAX_PENALIZED = int(os.getenv('PG_LONG_TX_MAX_PENALIZED', 3))
+
 try:
     RAM_SAMPLE_COUNT = max(1, int(os.getenv('RAM_SAMPLE_COUNT', 5)))
 except Exception:
@@ -1453,6 +1464,127 @@ def run_health_check_with_score():
         else:
             print("🟢 MEMORY: RAM durumu stabil.")
 
+        # 5.1 PostgreSQL Connection Saturation
+        if DB_ENGINE == "postgres":
+            try:
+                conn_util = health_strategy.get_connection_utilization(cursor)
+            except Exception as e:
+                conn_util = None
+                print(f"⚠️ CONNECTIONS: Baglanti metrikleri alinamadi: {e}")
+
+            if conn_util is None:
+                print("ℹ️ CONNECTIONS: PostgreSQL baglanti kullanim kontrolu uygulanmadi.")
+            else:
+                active_connections = int(conn_util.get("active_connections") or 0)
+                effective_max = int(conn_util.get("effective_max_connections") or 0)
+                max_connections = int(conn_util.get("max_connections") or 0)
+                utilization_pct = float(conn_util.get("utilization_pct") or 0.0)
+
+                if utilization_pct >= PG_CONN_CRIT_PCT:
+                    health_score -= PG_CONN_CRIT_PENALTY
+                    penalties.append(
+                        f"[-{PG_CONN_CRIT_PENALTY}] PostgreSQL baglanti kapasitesi kritik: %{utilization_pct:.1f} ({active_connections}/{effective_max}, max={max_connections})."
+                    )
+                    print(
+                        f"🔴 CONNECTIONS: Kapasite kritik seviyede (%{utilization_pct:.1f}) | aktif={active_connections}, limit={effective_max}, max={max_connections}"
+                    )
+                elif utilization_pct >= PG_CONN_WARN_PCT:
+                    health_score -= PG_CONN_WARN_PENALTY
+                    penalties.append(
+                        f"[-{PG_CONN_WARN_PENALTY}] PostgreSQL baglanti kapasitesi yuksek: %{utilization_pct:.1f} ({active_connections}/{effective_max}, max={max_connections})."
+                    )
+                    print(
+                        f"🟡 CONNECTIONS: Baglanti kullanim orani yuksek (%{utilization_pct:.1f}) | aktif={active_connections}, limit={effective_max}, max={max_connections}"
+                    )
+                else:
+                    print(
+                        f"🟢 CONNECTIONS: Baglanti kullanim orani guvenli (%{utilization_pct:.1f}) | aktif={active_connections}, limit={effective_max}"
+                    )
+
+        # 5.2 PostgreSQL Replication Durumu
+        if DB_ENGINE == "postgres":
+            try:
+                replication_rows = health_strategy.get_replication_status(cursor)
+            except Exception as e:
+                replication_rows = None
+                print(f"⚠️ REPLICATION: Replikasyon metrikleri alinamadi: {e}")
+
+            if replication_rows is None:
+                print("ℹ️ REPLICATION: Bu ortamda replikasyon kontrolu uygulanmadi.")
+            elif not replication_rows:
+                print("ℹ️ REPLICATION: Aktif replikasyon hedefi algilanmadi (tekil node olabilir).")
+            else:
+                unhealthy_replicas = 0
+                for repl_row in replication_rows:
+                    target = str(repl_row.get("target") or "unknown")
+                    state = str(repl_row.get("state") or "unknown").lower()
+                    lag_seconds = float(repl_row.get("lag_seconds") or 0.0)
+                    role = str(repl_row.get("role") or "primary")
+
+                    state_ok = state in {"streaming", "backup", "recovery"}
+                    lag_critical = lag_seconds >= PG_REPL_LAG_CRIT_SEC
+                    lag_warn = lag_seconds >= PG_REPL_LAG_WARN_SEC
+
+                    if not state_ok or lag_critical:
+                        unhealthy_replicas += 1
+                        health_score -= PG_REPL_LAG_PENALTY
+                        penalties.append(
+                            f"[-{PG_REPL_LAG_PENALTY}] Replikasyon riski: hedef={target}, role={role}, state={state}, lag={lag_seconds:.1f}s."
+                        )
+                        print(
+                            f"🔴 REPLICATION: hedef={target}, role={role}, state={state}, lag={lag_seconds:.1f}s"
+                        )
+                    elif lag_warn:
+                        print(
+                            f"🟡 REPLICATION: hedef={target}, role={role}, state={state}, lag={lag_seconds:.1f}s"
+                        )
+                    else:
+                        print(
+                            f"🟢 REPLICATION: hedef={target}, role={role}, state={state}, lag={lag_seconds:.1f}s"
+                        )
+
+                if unhealthy_replicas == 0:
+                    print("🟢 REPLICATION: Kritik seviye replikasyon problemi yok.")
+
+        # 5.3 PostgreSQL Uzun Transaction Kontrolu
+        if DB_ENGINE == "postgres":
+            try:
+                long_tx_rows = health_strategy.get_long_transactions(cursor, int(PG_LONG_TX_SEC))
+            except Exception as e:
+                long_tx_rows = None
+                print(f"⚠️ LONG TX: Uzun transaction verisi alinamadi: {e}")
+
+            if long_tx_rows is None:
+                print("ℹ️ LONG TX: Bu ortamda uzun transaction kontrolu uygulanmadi.")
+            elif not long_tx_rows:
+                print(f"🟢 LONG TX: {int(PG_LONG_TX_SEC)}s uzeri transaction yok.")
+            else:
+                penalized_count = 0
+                for tx in long_tx_rows:
+                    db_name = str(tx.get("db_name") or "unknown")
+                    if not is_database_monitored(db_name, monitored_databases):
+                        continue
+
+                    pid = int(tx.get("pid") or 0)
+                    tx_state = str(tx.get("state") or "unknown")
+                    age_seconds = float(tx.get("age_seconds") or 0.0)
+                    query_short = sanitize_sql_text(str(tx.get("query_text") or ""), 90)
+
+                    if penalized_count < max(1, PG_LONG_TX_MAX_PENALIZED):
+                        health_score -= PG_LONG_TX_PENALTY
+                        penalties.append(
+                            f"[-{PG_LONG_TX_PENALTY}] Uzun transaction: DB={db_name}, pid={pid}, state={tx_state}, age={age_seconds:.1f}s, SQL='{query_short}'"
+                        )
+                        penalized_count += 1
+
+                visible_count = len(long_tx_rows)
+                if penalized_count > 0:
+                    print(
+                        f"🔴 LONG TX: {visible_count} uzun transaction bulundu, {penalized_count} tanesi skora yansitildi."
+                    )
+                else:
+                    print("ℹ️ LONG TX: Uzun transactionlar izlendi, ancak secili DB kapsaminda ceza uygulanmadi.")
+
         # 6. Blocking Sorgular
         try:
             blocks = health_strategy.get_active_blocks(cursor)
@@ -1598,9 +1730,9 @@ def run_health_check_with_score():
                     print(f"ℹ️ JOBS: Scheduler bulundu ({scheduler_text}).")
             elif scheduler_found is False:
                 if scheduler_db:
-                    print(f"🟡 JOBS: Scheduler bulunamadi [db={scheduler_db}], job hata kontrolu pasif olabilir.")
+                    print(f"ℹ️ JOBS: Scheduler bulunamadi [db={scheduler_db}], bu ortamda job hata kontrolu opsiyonel olarak atlanabilir.")
                 else:
-                    print("🟡 JOBS: Scheduler bulunamadi, job hata kontrolu pasif olabilir.")
+                    print("ℹ️ JOBS: Scheduler bulunamadi, bu ortamda job hata kontrolu opsiyonel olarak atlanabilir.")
 
         try:
             failed_jobs = health_strategy.get_failed_jobs(cursor)
@@ -1612,7 +1744,7 @@ def run_health_check_with_score():
             print("ℹ️ JOBS: Bu motor icin job izleme uygulanmadi.")
         elif not failed_jobs:
             if scheduler_found is False:
-                print("🟡 JOBS: Scheduler bulunamadigi icin job hata kontrolu atlandi.")
+                print("ℹ️ JOBS: Scheduler bulunamadigi icin job hata kontrolu atlandi.")
             else:
                 lookback_hours = max(1, int(os.getenv('POSTGRES_JOB_LOOKBACK_HOURS', 24)))
                 print(f"🟢 JOBS: Son {lookback_hours} saatte hata veren görev (Job) yok.")
@@ -1687,12 +1819,15 @@ def run_health_check_with_score():
             bad_log_count = 0
             checked_log_db_count = 0
             last_used_pct = None
+            last_scope_label = ""
 
             for log in log_spaces:
                 db_name = log.get("db_name")
                 used_pct_raw = log.get("used_pct")
+                scope = str(log.get("scope") or "database").strip().lower()
+                is_cluster_scope = scope == "cluster" or str(db_name or "").lower() == "__cluster__"
 
-                if not is_database_monitored(db_name, monitored_databases):
+                if (not is_cluster_scope) and (not is_database_monitored(db_name, monitored_databases)):
                     continue
 
                 if used_pct_raw is None:
@@ -1701,11 +1836,18 @@ def run_health_check_with_score():
                 used_pct = float(used_pct_raw)
                 checked_log_db_count += 1
                 last_used_pct = used_pct
+                last_scope_label = "PostgreSQL WAL (cluster)" if is_cluster_scope else str(db_name)
 
                 if used_pct >= LOG_USED_CRIT_PCT:
                     health_score -= LOG_SPACE_PENALTY
-                    penalties.append(f"[-{LOG_SPACE_PENALTY}] Log Dosyası Riski: {db_name} veritabanının işlem günlüğü (Log) %{used_pct:.2f} dolu!")
-                    print(f"🔴 LOG KRİTİK: {db_name} Log Dosyası %{used_pct:.2f} dolu!")
+                    if is_cluster_scope:
+                        penalties.append(
+                            f"[-{LOG_SPACE_PENALTY}] Log Dosyası Riski: PostgreSQL WAL cluster doluluk oranı %{used_pct:.2f} (esik %{LOG_USED_CRIT_PCT:.0f})."
+                        )
+                        print(f"🔴 LOG KRİTİK: PostgreSQL WAL (cluster) %{used_pct:.2f} dolu!")
+                    else:
+                        penalties.append(f"[-{LOG_SPACE_PENALTY}] Log Dosyası Riski: {db_name} veritabanının işlem günlüğü (Log) %{used_pct:.2f} dolu!")
+                        print(f"🔴 LOG KRİTİK: {db_name} Log Dosyası %{used_pct:.2f} dolu!")
                     bad_log_count += 1
 
             if not log_spaces:
@@ -1713,7 +1855,10 @@ def run_health_check_with_score():
             elif checked_log_db_count == 0:
                 print("ℹ️ LOG SPACE: İzleme kapsamındaki veritabanları için log doluluk verisi bulunamadı.")
             elif bad_log_count == 0 and last_used_pct is not None:
-                print(f"🟢 LOG SPACE: Tüm veritabanlarının log doluluk oranları güvenli seviyede. Son okunan doluluk: %{last_used_pct:.0f}")
+                if last_scope_label:
+                    print(f"🟢 LOG SPACE: {last_scope_label} doluluk oranı güvenli seviyede. Son okunan doluluk: %{last_used_pct:.0f}")
+                else:
+                    print(f"🟢 LOG SPACE: Tüm veritabanlarının log doluluk oranları güvenli seviyede. Son okunan doluluk: %{last_used_pct:.0f}")
 
         print("=" * 50)
         print(f"🏆 GÜNCEL SUNUCU SAĞLIK SKORU: {health_score} / 100")
