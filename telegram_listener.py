@@ -25,6 +25,7 @@ Gereksinimler:
 import os
 import time
 import subprocess
+from threading import RLock
 import telebot
 import Test
 from datetime import datetime
@@ -36,8 +37,12 @@ from log_utils import emit_log, setup_process_logger
 # YAPILANDIRMA
 # ============================================================
 
-load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH = os.path.join(BASE_DIR, ".env")
+
+load_dotenv(dotenv_path=ENV_PATH)
 logger = setup_process_logger("telegram")
+RUNTIME_LOCK = RLock()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_IDS_RAW   = os.getenv("TELEGRAM_CHAT_IDS", "")
@@ -63,6 +68,8 @@ if IS_MSSQL:
     PROTECTED_DBS = {"master", "tempdb", "model", "msdb"}
 else:
     PROTECTED_DBS = {"postgres", "template0", "template1"}
+
+_RUNTIME_ENV_FINGERPRINT = ""
 
 # ============================================================
 # DOĞRULAMA
@@ -143,6 +150,112 @@ def get_postgres_admin_database(target_db: str) -> str:
         if candidate.lower() != target_lower:
             return candidate
     return "postgres"
+
+
+def _build_runtime_env_fingerprint() -> str:
+    keys = [
+        "DB_ENGINE",
+        "DB_SERVER",
+        "DB_PORT",
+        "DB_NAME",
+        "DB_USER",
+        "DB_PASSWORD",
+        "DB_DRIVER",
+        "POSTGRES_DOCKER",
+        "POSTGRES_USE_DOCKER",
+        "POSTGRES_DOCKER_CONTAINER",
+        "POSTGRES_MAINTENANCE_DB",
+    ]
+    return "|".join(f"{key}={os.getenv(key, '')}" for key in keys)
+
+
+def _apply_runtime_adapter(adapter):
+    global DB_ADAPTER
+    global IS_MSSQL
+    global IS_POSTGRES
+    global DB_ENGINE
+    global DB_SERVER
+    global DB_NAME
+    global DB_USER
+    global DB_PASSWORD
+    global DB_PORT
+    global PROTECTED_DBS
+
+    DB_ADAPTER = adapter
+    IS_MSSQL = isinstance(adapter, MSSQLAdapter)
+    IS_POSTGRES = isinstance(adapter, PostgresAdapter)
+    DB_ENGINE = "mssql" if IS_MSSQL else "postgresql"
+
+    DB_SERVER = adapter.server
+    DB_NAME = adapter.database
+    DB_USER = adapter.username
+    DB_PASSWORD = adapter.password
+    DB_PORT = getattr(adapter, "port", None)
+
+    if IS_MSSQL:
+        PROTECTED_DBS = {"master", "tempdb", "model", "msdb"}
+    else:
+        PROTECTED_DBS = {"postgres", "template0", "template1"}
+
+
+def refresh_runtime_context(force: bool = False) -> bool:
+    """Hot-reload DB runtime context from .env with safe fallback."""
+    global _RUNTIME_ENV_FINGERPRINT
+
+    load_dotenv(dotenv_path=ENV_PATH, override=True)
+    new_fingerprint = _build_runtime_env_fingerprint()
+
+    with RUNTIME_LOCK:
+        if (not force) and DB_ADAPTER is not None and _RUNTIME_ENV_FINGERPRINT == new_fingerprint:
+            return True
+
+        previous_engine = DB_ENGINE
+        previous_server = DB_SERVER
+        has_previous_context = DB_ADAPTER is not None
+
+    try:
+        candidate_adapter = get_db_adapter()
+        probe_conn = candidate_adapter.connect()
+        try:
+            probe_cursor = probe_conn.cursor()
+            probe_cursor.execute("SELECT 1")
+            probe_cursor.fetchone()
+        finally:
+            probe_conn.close()
+    except Exception as e:
+        if has_previous_context:
+            logger.warning(
+                "⚠️ Runtime hedef degisikligi algilandi ancak yeni baglanti dogrulanamadi: "
+                f"{e}. Mevcut hedef korunuyor ({previous_engine}@{previous_server})."
+            )
+            return True
+        raise ValueError(f"❌ Veritabanı adapteri başlatılamadı: {e}") from e
+
+    with RUNTIME_LOCK:
+        _apply_runtime_adapter(candidate_adapter)
+        _RUNTIME_ENV_FINGERPRINT = new_fingerprint
+        context_changed = previous_engine != DB_ENGINE or previous_server != DB_SERVER or force
+
+    if context_changed:
+        logger.info(f"♻️ Runtime hedef guncellendi → engine={DB_ENGINE}, server={DB_SERVER}")
+
+    return True
+
+
+def ensure_runtime_context(message) -> bool:
+    try:
+        return refresh_runtime_context()
+    except Exception as e:
+        bot.reply_to(
+            message,
+            f"❌ Veritabanı hedefi güncellenemedi:\n<code>{e}</code>",
+            parse_mode="HTML",
+        )
+        logger.error(f"❌ Runtime context yenilenemedi: {e}")
+        return False
+
+
+_RUNTIME_ENV_FINGERPRINT = _build_runtime_env_fingerprint()
 
 
 def parse_optional_bool_env(*names: str) -> bool | None:
@@ -252,7 +365,12 @@ def register_bot_commands():
 
 @bot.message_handler(commands=["deneme"])
 def deneme(message):
+    if not ensure_runtime_context(message):
+        return
     conn = get_db_connection()
+    if not conn:
+        bot.reply_to(message, "❌ Veritabanı bağlantısı kurulamadı!", parse_mode="HTML")
+        return
     cursor = conn.cursor()
     bot.reply_to(message,"Deneme", parse_mode="HTML")
 
@@ -260,6 +378,9 @@ def deneme(message):
 def cmd_help(message):
     """Kullanılabilir komutları listeler."""
     if not is_authorized(message):
+        return
+
+    if not ensure_runtime_context(message):
         return
 
     help_text = (
@@ -298,6 +419,9 @@ def cmd_help(message):
 def cmd_listdb(message):
     """Sunucudaki tüm veritabanlarını ve durumlarını listeler."""
     if not is_authorized(message):
+        return
+
+    if not ensure_runtime_context(message):
         return
 
     send_typing(message.chat.id)
@@ -368,6 +492,9 @@ def cmd_listdb(message):
 def cmd_statusdb(message):
     """Belirtilen veritabanının durumunu sorgular."""
     if not is_authorized(message):
+        return
+
+    if not ensure_runtime_context(message):
         return
 
     args = message.text.split(maxsplit=1)
@@ -469,6 +596,9 @@ def cmd_statusdb(message):
 def cmd_stopdb(message):
     """Belirtilen veritabanını OFFLINE yapar."""
     if not is_authorized(message):
+        return
+
+    if not ensure_runtime_context(message):
         return
 
     args = message.text.split(maxsplit=1)
@@ -594,6 +724,9 @@ def cmd_startdb(message):
     if not is_authorized(message):
         return
 
+    if not ensure_runtime_context(message):
+        return
+
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         bot.reply_to(
@@ -685,6 +818,9 @@ def cmd_startdb(message):
 @bot.message_handler(commands=["takebackup"])
 def take_backup(message):
     if not is_authorized(message):
+        return
+
+    if not ensure_runtime_context(message):
         return
 
     args = message.text.split(maxsplit=2)
@@ -861,6 +997,9 @@ def cmd_restartdb(message):
     if not is_authorized(message):
         return
 
+    if not ensure_runtime_context(message):
+        return
+
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         bot.reply_to(
@@ -1007,6 +1146,9 @@ def cmd_restartdb(message):
 def check(message):
     if not is_authorized(message):
         return
+
+    if not ensure_runtime_context(message):
+        return
     send_typing(message.chat.id)
     bot.reply_to(
         message,
@@ -1055,6 +1197,8 @@ def cmd_unknown(message):
 # ============================================================
 
 if __name__ == "__main__":
+    refresh_runtime_context(force=True)
+
     emit_log(
         logger,
         "INFO",
