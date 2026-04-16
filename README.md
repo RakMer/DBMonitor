@@ -3,6 +3,7 @@
 MSSQL sunucusunun sağlık durumunu otomatik olarak izleyen, skorlayan, modern bir web dashboard'unda gösteren ve Telegram üzerinden çift yönlü yönetim imkânı sunan kurumsal bir veritabanı izleme aracı.
 
 > Yeni: Kapsamli teknik dokuman icin `TOOL_DOKUMAN.md` dosyasina bakin.
+> Yeni: Local operasyonel runbook icin `RUNBOOK_LOCAL.md` dosyasina bakin.
 
 ---
 
@@ -14,6 +15,7 @@ MSSQL sunucusunun sağlık durumunu otomatik olarak izleyen, skorlayan, modern b
 - [Gereksinimler](#gereksinimler)
 - [Kurulum](#kurulum)
 - [Yapılandırma (.env)](#yapılandırma-env)
+- [Operasyonel Runbook (Local)](RUNBOOK_LOCAL.md)
 - [PostgreSQL Uzak Baglanti Kurulumu](#postgresql-uzak-baglanti-kurulumu)
 - [Kullanım](#kullanım)
 - [Telegram Bot Komutları](#telegram-bot-komutları)

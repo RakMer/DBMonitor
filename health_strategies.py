@@ -13,6 +13,11 @@ import shutil
 import subprocess
 import time
 
+try:
+    from psycopg2 import sql as pg_sql
+except Exception:
+    pg_sql = None
+
 
 POSTGRES_BACKUP_FILE_EXTENSIONS = (
     ".backup",
@@ -84,10 +89,6 @@ def _is_safe_sql_identifier(name: str | None) -> bool:
     if not name:
         return False
     return re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(name)) is not None
-
-
-def _quote_pg_identifier(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
 
 
 def _resolve_postgres_log_dir(data_directory: str | None, log_directory: str | None) -> str | None:
@@ -652,18 +653,28 @@ class MSSQLHealthStrategy(HealthCheckStrategy):
         excluded_databases: set[str],
         max_age_hours: int,
     ) -> list[str] | None:
-        excluded_db_sql = ", ".join(f"'{db}'" for db in sorted(excluded_databases)) or "''"
-        backup_query = f"""
+        safe_window_hours = -max(1, int(max_age_hours))
+        backup_query = """
         SELECT d.name
         FROM sys.databases d
         LEFT JOIN msdb.dbo.backupset b
             ON d.name = b.database_name
            AND b.type IN ('D', 'I')
-           AND b.backup_finish_date >= DATEADD(HOUR, -{max_age_hours}, GETDATE())
-        WHERE d.name NOT IN ({excluded_db_sql}) AND b.backup_finish_date IS NULL
+           AND b.backup_finish_date >= DATEADD(HOUR, ?, GETDATE())
+        WHERE b.backup_finish_date IS NULL
         """
-        cursor.execute(backup_query)
-        return [str(row[0]) for row in cursor.fetchall()]
+        cursor.execute(backup_query, (safe_window_hours,))
+
+        excluded = {str(name).strip().lower() for name in excluded_databases}
+        missing = []
+        for row in cursor.fetchall():
+            db_name = str(row[0] or "").strip()
+            if not db_name:
+                continue
+            if db_name.lower() in excluded:
+                continue
+            missing.append(db_name)
+        return missing
 
     def get_disk_usage(self, cursor) -> list[dict[str, object]] | None:
         cursor.execute(
@@ -705,40 +716,56 @@ class MSSQLHealthStrategy(HealthCheckStrategy):
         return rows
 
     def get_heavy_queries(self, cursor, top_n: int) -> list[dict[str, object]]:
-        query_stats_sql = f"""
-        SELECT TOP ({top_n})
-            COALESCE(DB_NAME(st.dbid), DB_NAME(pa.plan_dbid), 'unknown') AS db_name,
-            (CAST(qs.max_elapsed_time AS FLOAT) / 1000000.0) AS max_elapsed_sec,
-            (CAST(qs.total_elapsed_time AS FLOAT) / 1000000.0) AS total_elapsed_sec,
-            (CAST(qs.total_elapsed_time AS FLOAT) / 1000000.0) / NULLIF(qs.execution_count, 0) AS avg_elapsed_sec,
-            (CAST(qs.total_logical_reads AS FLOAT) / NULLIF(qs.execution_count, 0)) AS avg_logical_reads,
-            qs.execution_count,
-            sys.fn_varbintohexstr(qs.query_hash) AS query_id,
-            qs.last_execution_time,
-            SUBSTRING(
-                st.text,
-                (qs.statement_start_offset / 2) + 1,
-                (
+        safe_top_n = max(1, int(top_n))
+        query_stats_sql = """
+        WITH ranked_queries AS (
+            SELECT
+                COALESCE(DB_NAME(st.dbid), DB_NAME(pa.plan_dbid), 'unknown') AS db_name,
+                (CAST(qs.max_elapsed_time AS FLOAT) / 1000000.0) AS max_elapsed_sec,
+                (CAST(qs.total_elapsed_time AS FLOAT) / 1000000.0) AS total_elapsed_sec,
+                (CAST(qs.total_elapsed_time AS FLOAT) / 1000000.0) / NULLIF(qs.execution_count, 0) AS avg_elapsed_sec,
+                (CAST(qs.total_logical_reads AS FLOAT) / NULLIF(qs.execution_count, 0)) AS avg_logical_reads,
+                qs.execution_count,
+                sys.fn_varbintohexstr(qs.query_hash) AS query_id,
+                qs.last_execution_time,
+                SUBSTRING(
+                    st.text,
+                    (qs.statement_start_offset / 2) + 1,
                     (
-                        CASE qs.statement_end_offset
-                            WHEN -1 THEN DATALENGTH(st.text)
-                            ELSE qs.statement_end_offset
-                        END - qs.statement_start_offset
-                    ) / 2
-                ) + 1
-            ) AS query_text
-        FROM sys.dm_exec_query_stats qs
-        CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
-        OUTER APPLY (
-            SELECT TOP (1) TRY_CONVERT(INT, pa.value) AS plan_dbid
-            FROM sys.dm_exec_plan_attributes(qs.plan_handle) pa
-            WHERE pa.attribute = 'dbid'
-        ) pa
-        WHERE qs.execution_count > 0
-        ORDER BY qs.max_elapsed_time DESC
+                        (
+                            CASE qs.statement_end_offset
+                                WHEN -1 THEN DATALENGTH(st.text)
+                                ELSE qs.statement_end_offset
+                            END - qs.statement_start_offset
+                        ) / 2
+                    ) + 1
+                ) AS query_text,
+                ROW_NUMBER() OVER (ORDER BY qs.max_elapsed_time DESC) AS rn
+            FROM sys.dm_exec_query_stats qs
+            CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) st
+            OUTER APPLY (
+                SELECT TOP (1) TRY_CONVERT(INT, pa.value) AS plan_dbid
+                FROM sys.dm_exec_plan_attributes(qs.plan_handle) pa
+                WHERE pa.attribute = 'dbid'
+            ) pa
+            WHERE qs.execution_count > 0
+        )
+        SELECT
+            db_name,
+            max_elapsed_sec,
+            total_elapsed_sec,
+            avg_elapsed_sec,
+            avg_logical_reads,
+            execution_count,
+            query_id,
+            last_execution_time,
+            query_text
+        FROM ranked_queries
+        WHERE rn <= ?
+        ORDER BY rn
         """
 
-        cursor.execute(query_stats_sql)
+        cursor.execute(query_stats_sql, (safe_top_n,))
         rows = []
         for db_name, max_sec, total_sec, avg_sec, avg_reads, execution_count, query_id, _last_exec, query_text in cursor.fetchall():
             rows.append(
@@ -761,54 +788,41 @@ class MSSQLHealthStrategy(HealthCheckStrategy):
         min_pages: int,
         threshold_pct: float,
     ) -> list[dict[str, object]]:
-        rows_out: list[dict[str, object]] = []
-
-        cursor.execute("SELECT name FROM sys.databases WHERE state_desc = 'ONLINE'")
-        db_rows = cursor.fetchall()
-
-        for row in db_rows:
-            db_name = str(row[0] or "")
-            if not db_name:
-                continue
-
-            safe_db_name = db_name.replace("]", "]]")
-            frag_query = f"""
-            SELECT
-                N'{safe_db_name}' AS db_name,
-                obj.name AS table_name,
-                idx.name AS index_name,
-                ips.avg_fragmentation_in_percent,
-                ips.page_count
-            FROM sys.dm_db_index_physical_stats(DB_ID(N'{safe_db_name}'), NULL, NULL, NULL, 'SAMPLED') ips
-            INNER JOIN [{safe_db_name}].sys.indexes idx
-                ON ips.object_id = idx.object_id
-               AND ips.index_id = idx.index_id
-            INNER JOIN [{safe_db_name}].sys.objects obj
-                ON ips.object_id = obj.object_id
-            WHERE obj.type = 'U'
-              AND obj.is_ms_shipped = 0
-              AND idx.index_id > 0
-              AND ips.avg_fragmentation_in_percent > ?
-              AND ips.page_count > ?
-            ORDER BY ips.avg_fragmentation_in_percent DESC
+        cursor.execute(
             """
+            SELECT
+                DB_NAME(ips.database_id) AS db_name,
+                OBJECT_NAME(ips.object_id, ips.database_id) AS table_name,
+                ips.index_id,
+                MAX(ips.avg_fragmentation_in_percent) AS fragmentation_pct,
+                MAX(ips.page_count) AS page_count
+            FROM sys.dm_db_index_physical_stats(NULL, NULL, NULL, NULL, 'SAMPLED') ips
+            WHERE ips.database_id IS NOT NULL
+              AND ips.index_id > 0
+            GROUP BY ips.database_id, ips.object_id, ips.index_id
+            HAVING MAX(ips.avg_fragmentation_in_percent) > ?
+               AND MAX(ips.page_count) > ?
+            ORDER BY MAX(ips.avg_fragmentation_in_percent) DESC
+            """,
+            (threshold_pct, min_pages),
+        )
 
-            try:
-                cursor.execute(frag_query, (threshold_pct, min_pages))
-            except Exception:
-                # A single DB can fail due to permission/state issues; continue scanning others.
+        rows_out: list[dict[str, object]] = []
+        for db_name_value, table_name, index_id, frag_pct, page_count in cursor.fetchall():
+            db_name = str(db_name_value or "").strip()
+            table = str(table_name or "").strip()
+            if not db_name or not table:
                 continue
 
-            for db_name_value, table_name, index_name, frag_pct, page_count in cursor.fetchall():
-                rows_out.append(
-                    {
-                        "db_name": str(db_name_value or ""),
-                        "table_name": str(table_name or ""),
-                        "index_name": str(index_name or ""),
-                        "fragmentation_pct": float(frag_pct or 0),
-                        "page_count": int(page_count or 0),
-                    }
-                )
+            rows_out.append(
+                {
+                    "db_name": db_name,
+                    "table_name": table,
+                    "index_name": f"index_id_{int(index_id or 0)}",
+                    "fragmentation_pct": float(frag_pct or 0),
+                    "page_count": int(page_count or 0),
+                }
+            )
 
         return rows_out
 
@@ -826,13 +840,15 @@ class MSSQLHealthStrategy(HealthCheckStrategy):
         return [str(row[0]) for row in cursor.fetchall()]
 
     def get_failed_login_count(self, cursor, window_hours: int) -> int | None:
-        failed_login_query = f"""
+        safe_window_hours = max(1, int(window_hours))
+        failed_login_query = """
         SET NOCOUNT ON;
+        DECLARE @WindowHours INT = ?;
         DECLARE @ErrorLog TABLE (LogDate DATETIME, ProcessInfo NVARCHAR(100), Text NVARCHAR(MAX));
         INSERT INTO @ErrorLog EXEC sys.xp_readerrorlog 0, 1, N'Login failed';
-        SELECT COUNT(*) FROM @ErrorLog WHERE LogDate >= DATEADD(HOUR, -{window_hours}, GETDATE());
+        SELECT COUNT(*) FROM @ErrorLog WHERE LogDate >= DATEADD(HOUR, -@WindowHours, GETDATE());
         """
-        cursor.execute(failed_login_query)
+        cursor.execute(failed_login_query, (safe_window_hours,))
         row = cursor.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
@@ -1367,26 +1383,34 @@ class PostgresHealthStrategy(HealthCheckStrategy):
                         break
 
                 if schema_name:
-                    schema_quoted = _quote_pg_identifier(schema_name)
-                    query = f"""
-                    SELECT
-                        d.jobid,
-                        COALESCE(d.command, j.command, '') AS command_text,
-                        COALESCE(d.status, 'unknown') AS run_status
-                    FROM {schema_quoted}.job_run_details d
-                    LEFT JOIN {schema_quoted}.job j ON j.jobid = d.jobid
-                    WHERE COALESCE(d.end_time, d.start_time) >= (clock_timestamp() - (%s * INTERVAL '1 hour'))
-                      AND LOWER(COALESCE(d.status, '')) NOT IN ('succeeded', 'success')
-                    ORDER BY COALESCE(d.end_time, d.start_time) DESC
-                    LIMIT 100
-                    """
-
-                    try:
-                        job_cursor.execute(query, (lookback_hours,))
-                        rows = job_cursor.fetchall()
-                    except Exception:
+                    if pg_sql is None:
                         query_failed = True
                         rows = []
+                    else:
+                        query = pg_sql.SQL(
+                            """
+                            SELECT
+                                d.jobid,
+                                COALESCE(d.command, j.command, '') AS command_text,
+                                COALESCE(d.status, 'unknown') AS run_status
+                            FROM {}.job_run_details d
+                            LEFT JOIN {}.job j ON j.jobid = d.jobid
+                            WHERE COALESCE(d.end_time, d.start_time) >= (clock_timestamp() - (%s * INTERVAL '1 hour'))
+                              AND LOWER(COALESCE(d.status, '')) NOT IN ('succeeded', 'success')
+                            ORDER BY COALESCE(d.end_time, d.start_time) DESC
+                            LIMIT 100
+                            """
+                        ).format(
+                            pg_sql.Identifier(schema_name),
+                            pg_sql.Identifier(schema_name),
+                        )
+
+                        try:
+                            job_cursor.execute(query, (lookback_hours,))
+                            rows = job_cursor.fetchall()
+                        except Exception:
+                            query_failed = True
+                            rows = []
 
                     for jobid, command_text, run_status in rows:
                         status_text = str(run_status or "unknown")

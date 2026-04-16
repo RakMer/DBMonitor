@@ -131,6 +131,7 @@ def emit_log(
     correlation_id: str | None = None,
     context: Any | None = None,
     exc_info: bool = False,
+    stacklevel: int = 2,
 ):
     process_name = _process_from_logger_name(logger.name)
     logger.log(
@@ -143,4 +144,5 @@ def emit_log(
             "context": context,
         },
         exc_info=exc_info,
+        stacklevel=stacklevel,
     )

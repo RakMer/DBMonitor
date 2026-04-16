@@ -7,7 +7,10 @@ import hashlib
 import subprocess
 import time
 from datetime import datetime
-import xml.etree.ElementTree as ET
+try:
+    from defusedxml import ElementTree as DefusedET
+except Exception:
+    DefusedET = None
 from dotenv import load_dotenv
 from db_adapters import get_db_runtime
 from db_utils import get_sqlite_conn
@@ -129,6 +132,7 @@ def log_test_event(
         correlation_id=check_id or CURRENT_CHECK_ID,
         context=context,
         exc_info=exc_info,
+        stacklevel=3,
     )
 
 
@@ -251,7 +255,7 @@ def get_query_identity(query_row: dict[str, object]) -> str:
     normalized = " ".join(sql_text.lower().split())
     if not normalized:
         return "unknown"
-    return "fp:" + hashlib.sha1(normalized.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return "fp:" + hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
 
 def truncate_label(value: str, max_len: int = 42) -> str:
@@ -822,19 +826,19 @@ def collect_wait_metrics(cursor):
         cursor.execute("""
             SELECT wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms
             FROM sys.dm_os_wait_stats
-            WHERE wait_type NOT IN ({})
-        """.format(
-            ",".join(["?"] * len(ignore_waits))
-        ), tuple(sorted(ignore_waits)))
+        """)
 
         for wt, task_cnt, wait_ms, signal_ms in cursor.fetchall():
+            wait_type = str(wt or "")
+            if wait_type in ignore_waits:
+                continue
             cumulative_waits.append(
                 {
-                    "wait_type": wt,
+                    "wait_type": wait_type,
                     "waiting_tasks_count_total": int(task_cnt or 0),
                     "wait_time_ms_total": int(wait_ms or 0),
                     "signal_wait_ms_total": int(signal_ms or 0),
-                    "category": classify_wait_type(wt),
+                    "category": classify_wait_type(wait_type),
                 }
             )
     except Exception:
@@ -1035,8 +1039,8 @@ def collect_resource_metrics(cursor, monitored_databases):
             ORDER BY [timestamp] DESC
         """)
         row = cursor.fetchone()
-        if row and row[0]:
-            root = ET.fromstring(str(row[0]))
+        if row and row[0] and DefusedET is not None:
+            root = DefusedET.fromstring(str(row[0]))
             sql_cpu = root.find('.//SystemHealth/ProcessUtilization')
             idle_cpu = root.find('.//SystemHealth/SystemIdle')
             if sql_cpu is not None and idle_cpu is not None:

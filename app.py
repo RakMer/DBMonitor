@@ -472,19 +472,6 @@ def verify_startup() -> tuple[bool, list[str], list[str]]:
     except Exception as e:
         errors.append(f"Backup dizinine erisim yok ({backup_dir}): {e}")
 
-    if not errors:
-        try:
-            adapter = get_db_adapter()
-            conn = adapter.connect()
-            try:
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1")
-                cursor.fetchone()
-            finally:
-                conn.close()
-        except Exception as e:
-            errors.append(f"Hedef veritabanina baglanilamadi: {e}")
-
     return len(errors) == 0, errors, warnings
 
 
@@ -1409,16 +1396,20 @@ def api_monitoring_databases():
                 (db_name, is_monitored),
             )
 
-        placeholders = ", ".join(["?"] * len(all_dbs))
-        cursor.execute(
-            f"""
-            UPDATE MonitoringConfig
-            SET is_monitored = 0,
-                updated_at = datetime('now')
-            WHERE db_name NOT IN ({placeholders})
-            """,
-            tuple(all_dbs),
-        )
+        cursor.execute("SELECT db_name FROM MonitoringConfig")
+        known_dbs = {str(row["db_name"]) for row in cursor.fetchall() if row["db_name"] is not None}
+        incoming_dbs = {str(db_name) for db_name in all_dbs}
+        stale_dbs = sorted(known_dbs - incoming_dbs)
+        if stale_dbs:
+            cursor.executemany(
+                """
+                UPDATE MonitoringConfig
+                SET is_monitored = 0,
+                    updated_at = datetime('now')
+                WHERE db_name = ?
+                """,
+                [(db_name,) for db_name in stale_dbs],
+            )
 
         conn.commit()
         conn.close()
@@ -1735,20 +1726,19 @@ def api_wait_analysis():
 
     trend_labels = []
     trend_delta = []
-    snapshot_times = list(reversed(snapshot_times_desc[:20]))
     total_by_snapshot = {}
     cursor.execute(
         """
         SELECT snapshot_time, SUM(wait_time_ms_total) AS total_wait
         FROM WaitSnapshots
-        WHERE snapshot_time IN ({})
         GROUP BY snapshot_time
-        """.format(
-            ",".join(["?"] * len(snapshot_times))
-        ),
-        snapshot_times,
+        ORDER BY snapshot_time DESC
+        LIMIT 20
+        """
     )
-    for row in cursor.fetchall():
+    snapshot_totals_desc = cursor.fetchall()
+    snapshot_times = [row["snapshot_time"] for row in reversed(snapshot_totals_desc)]
+    for row in snapshot_totals_desc:
         total_by_snapshot[row["snapshot_time"]] = float(row["total_wait"] or 0)
 
     prev_total = None
