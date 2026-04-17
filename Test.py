@@ -765,6 +765,8 @@ def collect_wait_metrics(cursor):
             cumulative_waits = []
 
         active_waits = []
+        active_wait_ms_by_type = {}
+        active_wait_tasks_by_type = {}
         try:
             cursor.execute(
                 """
@@ -785,18 +787,49 @@ def collect_wait_metrics(cursor):
             )
             for sid, db_name, wait_event_type, wait_event, wait_ms, blocking_sid in cursor.fetchall():
                 wait_type = f"{wait_event_type}:{wait_event}"
+                wait_ms_int = int(float(wait_ms or 0))
                 active_waits.append(
                     {
                         "session_id": int(sid or 0),
                         "db_name": db_name or "unknown",
                         "wait_type": wait_type,
-                        "wait_time_ms": int(float(wait_ms or 0)),
+                        "wait_time_ms": wait_ms_int,
                         "blocking_session_id": int(blocking_sid or 0),
                         "category": classify_pg_wait_type(wait_event_type, wait_event),
                     }
                 )
+                active_wait_ms_by_type[wait_type] = active_wait_ms_by_type.get(wait_type, 0) + wait_ms_int
+                active_wait_tasks_by_type[wait_type] = active_wait_tasks_by_type.get(wait_type, 0) + 1
         except Exception:
             active_waits = []
+
+        # PostgreSQL does not expose MSSQL-like cumulative wait counters in pg_stat_activity.
+        # Use current active wait durations as snapshot totals so dashboard delta/trend works.
+        if cumulative_waits:
+            cumulative_index = {row["wait_type"]: row for row in cumulative_waits}
+            for row in cumulative_waits:
+                wait_type = row["wait_type"]
+                fallback_from_tasks = int(row.get("waiting_tasks_count_total") or 0) * 1000
+                row["wait_time_ms_total"] = int(active_wait_ms_by_type.get(wait_type, 0)) or fallback_from_tasks
+                row["signal_wait_ms_total"] = 0
+                row["waiting_tasks_count_total"] = max(
+                    int(row.get("waiting_tasks_count_total") or 0),
+                    int(active_wait_tasks_by_type.get(wait_type, 0)),
+                )
+
+            for wait_type, wait_ms_total in active_wait_ms_by_type.items():
+                if wait_type in cumulative_index:
+                    continue
+                wait_event_type, _, wait_event = wait_type.partition(":")
+                cumulative_waits.append(
+                    {
+                        "wait_type": wait_type,
+                        "waiting_tasks_count_total": int(active_wait_tasks_by_type.get(wait_type, 0)),
+                        "wait_time_ms_total": int(wait_ms_total),
+                        "signal_wait_ms_total": 0,
+                        "category": classify_pg_wait_type(wait_event_type, wait_event),
+                    }
+                )
 
         return {
             "snapshot_time": snapshot_time,

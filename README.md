@@ -1,6 +1,6 @@
 # 🗄️ DB Monitor
 
-MSSQL sunucusunun sağlık durumunu otomatik olarak izleyen, skorlayan, modern bir web dashboard'unda gösteren ve Telegram üzerinden çift yönlü yönetim imkânı sunan kurumsal bir veritabanı izleme aracı.
+MSSQL ve PostgreSQL saglik durumunu otomatik olarak izleyen, skorlayan, modern bir web dashboard'unda gosteren ve Telegram uzerinden cift yonlu yonetim imkani sunan kurumsal bir veritabani izleme araci.
 
 > Yeni: Kapsamli teknik dokuman icin `TOOL_DOKUMAN.md` dosyasina bakin.
 > Yeni: Local operasyonel runbook icin `RUNBOOK_LOCAL.md` dosyasina bakin.
@@ -27,7 +27,7 @@ MSSQL sunucusunun sağlık durumunu otomatik olarak izleyen, skorlayan, modern b
 
 ## 🎯 Genel Bakış
 
-DB Monitor, hedef MSSQL sunucusuna bağlanarak 10 farklı kritik metriği analiz eder, 100 üzerinden bir **Sağlık Skoru** hesaplar ve tüm verileri yerel bir SQLite veritabanına kaydeder. Flask tabanlı web arayüzü bu verileri canlı olarak görselleştirir. Skor belirli bir eşiğin altına düştüğünde Telegram üzerinden bildirim gönderir; aynı zamanda Telegram botu aracılığıyla veritabanlarını uzaktan yönetmeye olanak tanır.
+DB Monitor, hedef MSSQL veya PostgreSQL sunucusuna baglanarak kritik metrikleri analiz eder, 100 uzerinden bir **Saglik Skoru** hesaplar ve tum verileri yerel bir SQLite veritabanina kaydeder. Flask tabanli web arayuzu bu verileri canli olarak gorsellestirir. Skor belirli bir esigin altina dustugunde Telegram uzerinden bildirim gonderir; ayni zamanda Telegram botu araciligiyla veritabanlarini uzaktan yonetmeye olanak tanir.
 
 ---
 
@@ -52,7 +52,8 @@ DB Monitor, hedef MSSQL sunucusuna bağlanarak 10 farklı kritik metriği analiz
 - **Aktif Alarmlar** — Anlık ceza logları listesi
 - **Trend Grafiği** — Chart.js ile son 200 kontrolün zaman serisi
 - **Geçmiş Tablosu** — Tüm kontrol kayıtları ve ceza detayları
-- **Otomatik Yenileme** — 60 saniyede bir sayfa güncellenir
+- **Otomatik Yenileme** — 300 saniyede bir sayfa guncellenir
+- **Wait Analizi** — Wait breakdown + trend + blocking ozeti tek panelde sunulur
 - **Opsiyonel Basic Auth** — `DASHBOARD_USER` ve `DASHBOARD_PASS` tanımlanırsa giriş zorunlu olur
 
 ### 🤖 Telegram Entegrasyonu (`telegram_listener.py`)
@@ -85,7 +86,7 @@ DBMonitor/
 ## ⚙️ Gereksinimler
 
 - Python 3.10+
-- MSSQL Server (ODBC Driver 18 for SQL Server)
+- MSSQL Server (ODBC Driver 17 veya 18 for SQL Server)
 - macOS / Linux / Windows
 
 ### Python Paketleri
@@ -98,8 +99,8 @@ pyTelegramBotAPI
 ```
 
 ### Sistem Gereksinimleri
-- **macOS/Linux:** `unixODBC` + `ODBC Driver 18 for SQL Server`
-- **Windows:** Microsoft ODBC Driver 18 for SQL Server
+- **macOS/Linux:** `unixODBC` + `ODBC Driver 17/18 for SQL Server`
+- **Windows:** Microsoft ODBC Driver 17 veya 18 for SQL Server
 
 ---
 
@@ -169,6 +170,8 @@ DASHBOARD_PASS=guclu_sifre
 ```
 
 > Not: Geriye dönük uyumluluk için `TELEGRAM_ALERT_THRESHOLD` anahtarı da desteklenir.
+
+> Not: MSSQL surucu adi (`DB_DRIVER`, `MSSQL_DB_DRIVER`) kod tarafinda otomatik olarak 17/18 arasinda degistirilmez. Hangi driver adini yazdiysaniz o korunur; bu adin isletim sisteminde kurulu driver ile birebir eslesmesi gerekir.
 
 > Not: `POSTGRES_DOCKER` ile mod secimi yapabilirsiniz. `1` oldugunda Docker container uzerinden calisir, `0` oldugunda host/local araclari kullanilir. Ayni davranis icin `POSTGRES_USE_DOCKER` da desteklenir.
 
@@ -305,6 +308,8 @@ Bot yalnızca `.env` dosyasındaki `TELEGRAM_CHAT_IDS` listesindeki kullanıcıl
 | `/check` | Anlık sağlık kontrolünü tetikler ve skoru gönderir |
 
 > 🛡️ `master`, `tempdb`, `model`, `msdb` sistem veritabanlarına tüm komutlar engellenir.
+
+> Not: Telegram dinleyici `.env` degisikliklerini runtime'da algilar ve hedef baglantiyi yeniden dogrular; normalde proses restart gerekmeden yeni hedefe gecebilir.
 
 ---
 

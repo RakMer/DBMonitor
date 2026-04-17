@@ -248,6 +248,12 @@ Flask:
 - Dashboard'da kayitli hedef secimi + duzenle/sil paneli eklendi; otomatik yenileme 60 sn -> 300 sn yapildi.
 - Telegram PostgreSQL yedek akisi iyilestirildi: `NoneType.close` hatasi giderildi, Docker `pg_dump` ve `PG_DUMP` alias destegi eklendi.
 - README'ye PostgreSQL uzak baglanti kurulumu ve sik hata cozumleri eklendi.
+- Telegram runtime hot-reload eklendi: dinleyici process restart etmeden `.env` degisikliklerini algiliyor ve yeni hedef baglantisini dogrulayip uygular (`refresh_runtime_context`, `ensure_runtime_context`).
+- MSSQL ODBC surucu davranisi kalici hale getirildi: kod hosta gore 17/18 otomatik degistirme yapmiyor; kullanici `.env`'de ne secerse o korunuyor.
+- `ConnectionTargets` aktivasyon/guncelleme akisinda driver korunuyor; aktif profile yaziminda mevcut `DB_DRIVER`/`MSSQL_DB_DRIVER` degeri ezilmiyor.
+- PostgreSQL wait toplama mantigi iyilestirildi: `wait_time_ms_total` artik aktif bekleme suresinden turetiliyor; aktif sure yoksa waiting task sayisindan fallback uretiliyor.
+- `/api/wait-analysis` delta 0 oldugunda fallback ile latest absolute wait degerlerini gosteriyor; panelin tamamen bos gorunmesi engellendi.
+- Bandit proje taramasi tekrarlandi (DBvenv dislanmis): toplam 55 bulgu, HIGH=0, MEDIUM=11, LOW=44. MEDIUM bulgularin tamami `stress_test.py` icindeki B608 sinifinda.
 
 ## 12. Calistirma Komutlari
 - python app.py
@@ -270,10 +276,13 @@ Flask:
 - SQLite WAL/busy-timeout iyilestirmeleri ile eszamanli yazma dayanikliligini arttirmak.
 - Test coverage arttirma (en az API smoke + DB adapter baglanti testleri).
 
-## 15. Guncel Durum (2026-04-15)
+## 15. Guncel Durum (2026-04-17)
 - Coklu sunucu/profil bazli gecis altyapisi backend ve frontend tarafinda aktif durumda.
 - PostgreSQL uzak baglanti sorunlarinda dogru `pg_hba.conf` istemci IP eslesmesi kritik bulgu olarak dogrulandi.
 - Lokal ortamda birincil hedef: v1 stabilizasyon (konfig hijyeni, preflight, smoke test, operasyonel runbook).
 - Sonraki faz hedefi: uzak sunucuda ayni stabilite kriterleriyle v1 roll-out.
+- Driver kaliciligi sorunu kapatildi: MSSQL surucu degeri artik kullanici secimini koruyor (Mac/Windows farkinda otomatik overwrite yok).
+- PostgreSQL wait panelinde anlik veri kaybolma davranisi fallback ile iyilestirildi; dusuk trafik anlarinda az veri normal kabul edilerek UI bos kalmiyor.
+- Operasyonel not: `.env` icinde gercek token/sifre bulunmasi guvenlik riski; rotasyon ve gizli degerlerin yenilenmesi onerilir.
 
 Bu dosya, repo anlik durumunu teknik devralma odakli ozetler.

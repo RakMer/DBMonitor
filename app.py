@@ -1725,6 +1725,27 @@ def api_wait_analysis():
             }
         )
 
+    # Fallback: some engines (especially PostgreSQL snapshots) can stay flat between
+    # consecutive runs, yielding zero deltas even when waits exist. In that case,
+    # show latest absolute waits so the panel does not appear empty.
+    if not top_waits:
+        category_totals = {}
+        for row in latest_waits:
+            latest_wait = float(row["wait_time_ms_total"] or 0)
+            if latest_wait <= 0:
+                continue
+            category = row["category"] or "Other"
+            category_totals[category] = category_totals.get(category, 0.0) + latest_wait
+            top_waits.append(
+                {
+                    "wait_type": row["wait_type"],
+                    "category": category,
+                    "wait_ms": round(latest_wait, 2),
+                    "signal_ms": round(float(row["signal_wait_ms_total"] or 0), 2),
+                    "tasks": int(row["waiting_tasks_count_total"] or 0),
+                }
+            )
+
     top_waits.sort(key=lambda x: x["wait_ms"], reverse=True)
     top_waits = top_waits[:12]
 
