@@ -8,7 +8,7 @@ import threading
 from datetime import datetime
 from flask import Flask, Response, jsonify, render_template, request
 from dotenv import dotenv_values, load_dotenv, set_key
-from db_adapters import MSSQLAdapter, PostgresAdapter, get_db_adapter, get_default_mssql_driver
+from db_adapters import MSSQLAdapter, PostgresAdapter, get_db_adapter
 from db_utils import get_sqlite_conn
 from log_utils import emit_log, make_correlation_id, setup_process_logger
 
@@ -113,8 +113,10 @@ DB_TARGET_PROFILE_KEYS = (
     "PG_DUMP_BIN",
 )
 
-DEFAULT_MSSQL_DRIVER = get_default_mssql_driver(
-    os.getenv("MSSQL_DB_DRIVER") or os.getenv("DB_DRIVER")
+DEFAULT_MSSQL_DRIVER = (
+    os.getenv("MSSQL_DB_DRIVER")
+    or os.getenv("DB_DRIVER")
+    or "ODBC Driver 18 for SQL Server"
 )
 
 
@@ -258,7 +260,7 @@ def load_db_target_settings(cfg: dict[str, str] | None = None) -> dict[str, str]
     return settings
 
 
-def build_active_db_target_updates(target: dict[str, str]) -> dict[str, str]:
+def build_active_db_target_updates(target: dict[str, str], current_cfg: dict[str, str] | None = None) -> dict[str, str]:
     active_engine = target["ACTIVE_DB_ENGINE"]
 
     if active_engine == "mssql":
@@ -272,6 +274,11 @@ def build_active_db_target_updates(target: dict[str, str]) -> dict[str, str]:
         if missing:
             raise ValueError("MSSQL profili eksik alanlar: " + ", ".join(missing))
 
+        active_cfg = current_cfg or dotenv_values(ENV_PATH)
+        existing_driver = str(active_cfg.get("DB_DRIVER") or "").strip()
+        profile_driver = str(target.get("MSSQL_DB_DRIVER") or "").strip()
+        driver_to_use = existing_driver or profile_driver or DEFAULT_MSSQL_DRIVER
+
         updates = {
             "ACTIVE_DB_ENGINE": "mssql",
             "DB_ENGINE": "mssql",
@@ -280,7 +287,7 @@ def build_active_db_target_updates(target: dict[str, str]) -> dict[str, str]:
             "DB_NAME": str(target["MSSQL_DB_NAME"]),
             "DB_USER": str(target["MSSQL_DB_USER"]),
             "DB_PASSWORD": str(target["MSSQL_DB_PASSWORD"]),
-            "DB_DRIVER": str(target["MSSQL_DB_DRIVER"] or DEFAULT_MSSQL_DRIVER),
+            "DB_DRIVER": str(driver_to_use),
         }
     else:
         required = {
@@ -312,7 +319,7 @@ def build_active_db_target_updates(target: dict[str, str]) -> dict[str, str]:
 def apply_active_db_target() -> dict[str, str]:
     cfg = dotenv_values(ENV_PATH)
     target = load_db_target_settings(cfg)
-    updates = build_active_db_target_updates(target)
+    updates = build_active_db_target_updates(target, current_cfg=cfg)
 
     for key in DB_TARGET_PROFILE_KEYS:
         if key in target:
@@ -758,6 +765,7 @@ def upsert_connection_target(conn, target: dict[str, str], set_active: bool = Tr
 
 
 def persist_target_row_to_profile(row):
+    cfg = dotenv_values(ENV_PATH)
     engine = normalize_db_engine(row["engine"], default="mssql")
     if engine == "mssql":
         persist_setting("MSSQL_DB_SERVER", str(row["server"] or ""))
@@ -765,7 +773,11 @@ def persist_target_row_to_profile(row):
         persist_setting("MSSQL_DB_NAME", str(row["database_name"] or "master"))
         persist_setting("MSSQL_DB_USER", str(row["username"] or ""))
         persist_setting("MSSQL_DB_PASSWORD", str(row["password"] or ""))
-        persist_setting("MSSQL_DB_DRIVER", str(row["driver"] or DEFAULT_MSSQL_DRIVER))
+        existing_profile_driver = str(cfg.get("MSSQL_DB_DRIVER") or "").strip()
+        existing_runtime_driver = str(cfg.get("DB_DRIVER") or "").strip()
+        preserved_driver = existing_profile_driver or existing_runtime_driver
+        row_driver = str(row["driver"] or "").strip()
+        persist_setting("MSSQL_DB_DRIVER", preserved_driver or row_driver or DEFAULT_MSSQL_DRIVER)
         persist_setting("ACTIVE_DB_ENGINE", "mssql")
     else:
         persist_setting("POSTGRES_DB_SERVER", str(row["server"] or ""))
@@ -1101,7 +1113,7 @@ def api_settings():
             preview_cfg.update(pending_db_target)
 
             target_preview = load_db_target_settings(preview_cfg)
-            active_updates = build_active_db_target_updates(target_preview)
+            active_updates = build_active_db_target_updates(target_preview, current_cfg=preview_cfg)
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
 
