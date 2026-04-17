@@ -8,7 +8,7 @@ import threading
 from datetime import datetime
 from flask import Flask, Response, jsonify, render_template, request
 from dotenv import dotenv_values, load_dotenv, set_key
-from db_adapters import MSSQLAdapter, PostgresAdapter, get_db_adapter
+from db_adapters import MSSQLAdapter, PostgresAdapter, get_db_adapter, get_default_mssql_driver
 from db_utils import get_sqlite_conn
 from log_utils import emit_log, make_correlation_id, setup_process_logger
 
@@ -111,6 +111,10 @@ DB_TARGET_PROFILE_KEYS = (
     "POSTGRES_DB_PASSWORD",
     "POSTGRES_DOCKER_CONTAINER",
     "PG_DUMP_BIN",
+)
+
+DEFAULT_MSSQL_DRIVER = get_default_mssql_driver(
+    os.getenv("MSSQL_DB_DRIVER") or os.getenv("DB_DRIVER")
 )
 
 
@@ -231,7 +235,7 @@ def load_db_target_settings(cfg: dict[str, str] | None = None) -> dict[str, str]
             "DB_DRIVER",
             "mssql",
             current_engine,
-            "ODBC Driver 18 for SQL Server",
+            DEFAULT_MSSQL_DRIVER,
         ),
         "POSTGRES_DB_SERVER": _read_profile_value(active_cfg, "POSTGRES_DB_SERVER", "DB_SERVER", "postgresql", current_engine),
         "POSTGRES_DB_PORT": _read_profile_value(active_cfg, "POSTGRES_DB_PORT", "DB_PORT", "postgresql", current_engine, "5432"),
@@ -276,7 +280,7 @@ def build_active_db_target_updates(target: dict[str, str]) -> dict[str, str]:
             "DB_NAME": str(target["MSSQL_DB_NAME"]),
             "DB_USER": str(target["MSSQL_DB_USER"]),
             "DB_PASSWORD": str(target["MSSQL_DB_PASSWORD"]),
-            "DB_DRIVER": str(target["MSSQL_DB_DRIVER"] or "ODBC Driver 18 for SQL Server"),
+            "DB_DRIVER": str(target["MSSQL_DB_DRIVER"] or DEFAULT_MSSQL_DRIVER),
         }
     else:
         required = {
@@ -325,7 +329,7 @@ DB_SERVER = os.getenv("DB_SERVER")
 DB_NAME = os.getenv("DB_NAME", "master")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
+DB_DRIVER = os.getenv("DB_DRIVER", DEFAULT_MSSQL_DRIVER)
 
 
 def constant_time_compare(val: str | None, expected: str | None) -> bool:
@@ -761,7 +765,7 @@ def persist_target_row_to_profile(row):
         persist_setting("MSSQL_DB_NAME", str(row["database_name"] or "master"))
         persist_setting("MSSQL_DB_USER", str(row["username"] or ""))
         persist_setting("MSSQL_DB_PASSWORD", str(row["password"] or ""))
-        persist_setting("MSSQL_DB_DRIVER", str(row["driver"] or "ODBC Driver 18 for SQL Server"))
+        persist_setting("MSSQL_DB_DRIVER", str(row["driver"] or DEFAULT_MSSQL_DRIVER))
         persist_setting("ACTIVE_DB_ENGINE", "mssql")
     else:
         persist_setting("POSTGRES_DB_SERVER", str(row["server"] or ""))

@@ -23,6 +23,38 @@ def _looks_like_port_only(value: str | None) -> bool:
     return bool(trimmed) and trimmed.isdigit() and 1 <= len(trimmed) <= 5
 
 
+def get_default_mssql_driver(preferred: str | None = None) -> str:
+    """Return the safest MSSQL ODBC driver for this host.
+
+    Priority:
+    1) explicit preferred value (if provided)
+    2) installed ODBC Driver 18
+    3) installed ODBC Driver 17
+    4) installed legacy SQL Server driver
+    5) fallback literal for backward compatibility
+    """
+
+    if str(preferred or "").strip():
+        return str(preferred).strip()
+
+    try:
+        import pyodbc  # type: ignore
+
+        installed = {str(name).strip() for name in pyodbc.drivers() if str(name).strip()}
+        for candidate in (
+            "ODBC Driver 18 for SQL Server",
+            "ODBC Driver 17 for SQL Server",
+            "SQL Server",
+        ):
+            if candidate in installed:
+                return candidate
+    except Exception:
+        # pyodbc may be unavailable in PostgreSQL-only deployments.
+        pass
+
+    return "ODBC Driver 18 for SQL Server"
+
+
 class DatabaseAdapter(ABC):
     """Abstract adapter contract for database engines.
 
@@ -183,7 +215,7 @@ def get_db_adapter() -> DatabaseAdapter:
         )
 
     if engine in {"mssql", "sqlserver", "sql_server"}:
-        driver = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
+        driver = get_default_mssql_driver(os.getenv("DB_DRIVER"))
         return MSSQLAdapter(
             server=server,
             database=database,

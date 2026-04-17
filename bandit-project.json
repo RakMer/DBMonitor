@@ -1,6 +1,6 @@
 {
   "errors": [],
-  "generated_at": "2026-04-16T09:32:31Z",
+  "generated_at": "2026-04-16T12:19:16Z",
   "metrics": {
     "./Test.py": {
       "CONFIDENCE.HIGH": 14,
@@ -11,7 +11,7 @@
       "SEVERITY.LOW": 15,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 1558,
+      "loc": 1686,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -63,7 +63,7 @@
       "SEVERITY.LOW": 12,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 1393,
+      "loc": 1560,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -89,7 +89,7 @@
       "SEVERITY.LOW": 6,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 853,
+      "loc": 1002,
       "nosec": 0,
       "skipped_tests": 0
     },
@@ -102,7 +102,7 @@
       "SEVERITY.LOW": 36,
       "SEVERITY.MEDIUM": 0,
       "SEVERITY.UNDEFINED": 0,
-      "loc": 5711,
+      "loc": 6155,
       "nosec": 0,
       "skipped_tests": 0
     }
@@ -149,7 +149,7 @@
       "test_name": "hardcoded_password_string"
     },
     {
-      "code": "558         return float(psutil.cpu_percent(interval=0.15))\n559     except Exception:\n560         pass\n561 \n",
+      "code": "569         return float(psutil.cpu_percent(interval=0.15))\n570     except Exception:\n571         pass\n572 \n",
       "col_offset": 4,
       "end_col_offset": 12,
       "filename": "./Test.py",
@@ -160,17 +160,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 559,
+      "line_number": 570,
       "line_range": [
-        559,
-        560
+        570,
+        571
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "576         return float(psutil.virtual_memory().percent)\n577     except Exception:\n578         pass\n579 \n",
+      "code": "587         return float(psutil.virtual_memory().percent)\n588     except Exception:\n589         pass\n590 \n",
       "col_offset": 4,
       "end_col_offset": 12,
       "filename": "./Test.py",
@@ -181,17 +181,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 577,
+      "line_number": 588,
       "line_range": [
-        577,
-        578
+        588,
+        589
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "585         return max(0.0, min(100.0, ((total_pages - avail_pages) / total_pages) * 100.0))\n586     except Exception:\n587         pass\n588 \n",
+      "code": "596         return max(0.0, min(100.0, ((total_pages - avail_pages) / total_pages) * 100.0))\n597     except Exception:\n598         pass\n599 \n",
       "col_offset": 4,
       "end_col_offset": 12,
       "filename": "./Test.py",
@@ -202,17 +202,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 586,
+      "line_number": 597,
       "line_range": [
-        586,
-        587
+        597,
+        598
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "590     try:\n591         memsize_result = subprocess.run(\n592             [\"sysctl\", \"-n\", \"hw.memsize\"],\n593             capture_output=True,\n594             text=True,\n595             encoding=\"utf-8\",\n596             errors=\"ignore\",\n597             timeout=3,\n598             check=False,\n599         )\n600         vm_stat_result = subprocess.run(\n",
+      "code": "601     try:\n602         memsize_result = subprocess.run(\n603             [\"sysctl\", \"-n\", \"hw.memsize\"],\n604             capture_output=True,\n605             text=True,\n606             encoding=\"utf-8\",\n607             errors=\"ignore\",\n608             timeout=3,\n609             check=False,\n610         )\n611         vm_stat_result = subprocess.run(\n",
       "col_offset": 25,
       "end_col_offset": 9,
       "filename": "./Test.py",
@@ -223,24 +223,24 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Starting a process with a partial executable path",
-      "line_number": 591,
+      "line_number": 602,
       "line_range": [
-        591,
-        592,
-        593,
-        594,
-        595,
-        596,
-        597,
-        598,
-        599
+        602,
+        603,
+        604,
+        605,
+        606,
+        607,
+        608,
+        609,
+        610
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html",
       "test_id": "B607",
       "test_name": "start_process_with_partial_path"
     },
     {
-      "code": "590     try:\n591         memsize_result = subprocess.run(\n592             [\"sysctl\", \"-n\", \"hw.memsize\"],\n593             capture_output=True,\n594             text=True,\n595             encoding=\"utf-8\",\n596             errors=\"ignore\",\n597             timeout=3,\n598             check=False,\n599         )\n600         vm_stat_result = subprocess.run(\n",
+      "code": "601     try:\n602         memsize_result = subprocess.run(\n603             [\"sysctl\", \"-n\", \"hw.memsize\"],\n604             capture_output=True,\n605             text=True,\n606             encoding=\"utf-8\",\n607             errors=\"ignore\",\n608             timeout=3,\n609             check=False,\n610         )\n611         vm_stat_result = subprocess.run(\n",
       "col_offset": 25,
       "end_col_offset": 9,
       "filename": "./Test.py",
@@ -251,24 +251,24 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 591,
+      "line_number": 602,
       "line_range": [
-        591,
-        592,
-        593,
-        594,
-        595,
-        596,
-        597,
-        598,
-        599
+        602,
+        603,
+        604,
+        605,
+        606,
+        607,
+        608,
+        609,
+        610
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",
       "test_name": "subprocess_without_shell_equals_true"
     },
     {
-      "code": "599         )\n600         vm_stat_result = subprocess.run(\n601             [\"vm_stat\"],\n602             capture_output=True,\n603             text=True,\n604             encoding=\"utf-8\",\n605             errors=\"ignore\",\n606             timeout=3,\n607             check=False,\n608         )\n609         if memsize_result.returncode == 0 and vm_stat_result.returncode == 0:\n",
+      "code": "610         )\n611         vm_stat_result = subprocess.run(\n612             [\"vm_stat\"],\n613             capture_output=True,\n614             text=True,\n615             encoding=\"utf-8\",\n616             errors=\"ignore\",\n617             timeout=3,\n618             check=False,\n619         )\n620         if memsize_result.returncode == 0 and vm_stat_result.returncode == 0:\n",
       "col_offset": 25,
       "end_col_offset": 9,
       "filename": "./Test.py",
@@ -279,24 +279,24 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Starting a process with a partial executable path",
-      "line_number": 600,
+      "line_number": 611,
       "line_range": [
-        600,
-        601,
-        602,
-        603,
-        604,
-        605,
-        606,
-        607,
-        608
+        611,
+        612,
+        613,
+        614,
+        615,
+        616,
+        617,
+        618,
+        619
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html",
       "test_id": "B607",
       "test_name": "start_process_with_partial_path"
     },
     {
-      "code": "599         )\n600         vm_stat_result = subprocess.run(\n601             [\"vm_stat\"],\n602             capture_output=True,\n603             text=True,\n604             encoding=\"utf-8\",\n605             errors=\"ignore\",\n606             timeout=3,\n607             check=False,\n608         )\n609         if memsize_result.returncode == 0 and vm_stat_result.returncode == 0:\n",
+      "code": "610         )\n611         vm_stat_result = subprocess.run(\n612             [\"vm_stat\"],\n613             capture_output=True,\n614             text=True,\n615             encoding=\"utf-8\",\n616             errors=\"ignore\",\n617             timeout=3,\n618             check=False,\n619         )\n620         if memsize_result.returncode == 0 and vm_stat_result.returncode == 0:\n",
       "col_offset": 25,
       "end_col_offset": 9,
       "filename": "./Test.py",
@@ -307,24 +307,24 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 600,
+      "line_number": 611,
       "line_range": [
-        600,
-        601,
-        602,
-        603,
-        604,
-        605,
-        606,
-        607,
-        608
+        611,
+        612,
+        613,
+        614,
+        615,
+        616,
+        617,
+        618,
+        619
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",
       "test_name": "subprocess_without_shell_equals_true"
     },
     {
-      "code": "657                 return max(0.0, min(100.0, used_pct))\n658     except Exception:\n659         pass\n660 \n",
+      "code": "668                 return max(0.0, min(100.0, used_pct))\n669     except Exception:\n670         pass\n671 \n",
       "col_offset": 4,
       "end_col_offset": 12,
       "filename": "./Test.py",
@@ -335,17 +335,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 658,
+      "line_number": 669,
       "line_range": [
-        658,
-        659
+        669,
+        670
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "671                 return max(0.0, min(100.0, ((total_kb - avail_kb) / total_kb) * 100.0))\n672     except Exception:\n673         pass\n674 \n",
+      "code": "682                 return max(0.0, min(100.0, ((total_kb - avail_kb) / total_kb) * 100.0))\n683     except Exception:\n684         pass\n685 \n",
       "col_offset": 4,
       "end_col_offset": 12,
       "filename": "./Test.py",
@@ -356,17 +356,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 672,
+      "line_number": 683,
       "line_range": [
-        672,
-        673
+        683,
+        684
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "684                 time.sleep(RAM_SAMPLE_INTERVAL_SEC)\n685             except Exception:\n686                 pass\n687 \n",
+      "code": "695                 time.sleep(RAM_SAMPLE_INTERVAL_SEC)\n696             except Exception:\n697                 pass\n698 \n",
       "col_offset": 12,
       "end_col_offset": 20,
       "filename": "./Test.py",
@@ -377,17 +377,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 685,
+      "line_number": 696,
       "line_range": [
-        685,
-        686
+        696,
+        697
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "953             cpu_pct = max(cpu_pct, activity_pct)\n954         except Exception:\n955             pass\n956 \n",
+      "code": "964             cpu_pct = max(cpu_pct, activity_pct)\n965         except Exception:\n966             pass\n967 \n",
       "col_offset": 8,
       "end_col_offset": 16,
       "filename": "./Test.py",
@@ -398,17 +398,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 954,
+      "line_number": 965,
       "line_range": [
-        954,
-        955
+        965,
+        966
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "1173             )\n1174         except Exception:\n1175             continue\n1176 \n",
+      "code": "1184             )\n1185         except Exception:\n1186             continue\n1187 \n",
       "col_offset": 8,
       "end_col_offset": 20,
       "filename": "./Test.py",
@@ -419,17 +419,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Continue detected.",
-      "line_number": 1174,
+      "line_number": 1185,
       "line_range": [
-        1174,
-        1175
+        1185,
+        1186
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b112_try_except_continue.html",
       "test_id": "B112",
       "test_name": "try_except_continue"
     },
     {
-      "code": "1751                 # Bir sonraki g\u00f6nderiim i\u00e7in 1-3 saat aras\u0131 rastgele bir s\u00fcre belirle\n1752                 wait_seconds = random.randint(1 * 3600, 3 * 3600)\n1753                 app.alert_resend_after = now_dt + timedelta(seconds=wait_seconds)\n",
+      "code": "1896                 # Bir sonraki g\u00f6nderiim i\u00e7in 1-3 saat aras\u0131 rastgele bir s\u00fcre belirle\n1897                 wait_seconds = random.randint(1 * 3600, 3 * 3600)\n1898                 app.alert_resend_after = now_dt + timedelta(seconds=wait_seconds)\n",
       "col_offset": 31,
       "end_col_offset": 65,
       "filename": "./Test.py",
@@ -440,9 +440,9 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Standard pseudo-random generators are not suitable for security/cryptographic purposes.",
-      "line_number": 1752,
+      "line_number": 1897,
       "line_range": [
-        1752
+        1897
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_calls.html#b311-random",
       "test_id": "B311",
@@ -539,7 +539,7 @@
       "test_name": "blacklist"
     },
     {
-      "code": "151     try:\n152         result = subprocess.run(\n153             [\"docker\", \"logs\", \"--since\", since_value, container_name],\n154             capture_output=True,\n155             text=True,\n156             encoding=\"utf-8\",\n157             errors=\"ignore\",\n158             timeout=15,\n159             check=False,\n160         )\n161     except Exception:\n",
+      "code": "193     try:\n194         result = subprocess.run(\n195             [\"docker\", \"logs\", \"--since\", since_value, container_name],\n196             capture_output=True,\n197             text=True,\n198             encoding=\"utf-8\",\n199             errors=\"ignore\",\n200             timeout=15,\n201             check=False,\n202         )\n203     except Exception:\n",
       "col_offset": 17,
       "end_col_offset": 9,
       "filename": "./health_strategies.py",
@@ -550,24 +550,24 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Starting a process with a partial executable path",
-      "line_number": 152,
+      "line_number": 194,
       "line_range": [
-        152,
-        153,
-        154,
-        155,
-        156,
-        157,
-        158,
-        159,
-        160
+        194,
+        195,
+        196,
+        197,
+        198,
+        199,
+        200,
+        201,
+        202
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html",
       "test_id": "B607",
       "test_name": "start_process_with_partial_path"
     },
     {
-      "code": "151     try:\n152         result = subprocess.run(\n153             [\"docker\", \"logs\", \"--since\", since_value, container_name],\n154             capture_output=True,\n155             text=True,\n156             encoding=\"utf-8\",\n157             errors=\"ignore\",\n158             timeout=15,\n159             check=False,\n160         )\n161     except Exception:\n",
+      "code": "193     try:\n194         result = subprocess.run(\n195             [\"docker\", \"logs\", \"--since\", since_value, container_name],\n196             capture_output=True,\n197             text=True,\n198             encoding=\"utf-8\",\n199             errors=\"ignore\",\n200             timeout=15,\n201             check=False,\n202         )\n203     except Exception:\n",
       "col_offset": 17,
       "end_col_offset": 9,
       "filename": "./health_strategies.py",
@@ -578,24 +578,24 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 152,
+      "line_number": 194,
       "line_range": [
-        152,
-        153,
-        154,
-        155,
-        156,
-        157,
-        158,
-        159,
-        160
+        194,
+        195,
+        196,
+        197,
+        198,
+        199,
+        200,
+        201,
+        202
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",
       "test_name": "subprocess_without_shell_equals_true"
     },
     {
-      "code": "183     try:\n184         result = subprocess.run(\n185             [\"docker\", \"exec\", container_name, \"df\", \"-P\", path],\n186             capture_output=True,\n187             text=True,\n188             encoding=\"utf-8\",\n189             errors=\"ignore\",\n190             timeout=10,\n191             check=False,\n192         )\n193     except Exception:\n",
+      "code": "225     try:\n226         result = subprocess.run(\n227             [\"docker\", \"exec\", container_name, \"df\", \"-P\", path],\n228             capture_output=True,\n229             text=True,\n230             encoding=\"utf-8\",\n231             errors=\"ignore\",\n232             timeout=10,\n233             check=False,\n234         )\n235     except Exception:\n",
       "col_offset": 17,
       "end_col_offset": 9,
       "filename": "./health_strategies.py",
@@ -606,73 +606,52 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Starting a process with a partial executable path",
-      "line_number": 184,
+      "line_number": 226,
       "line_range": [
-        184,
-        185,
-        186,
-        187,
-        188,
-        189,
-        190,
-        191,
-        192
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html",
-      "test_id": "B607",
-      "test_name": "start_process_with_partial_path"
-    },
-    {
-      "code": "183     try:\n184         result = subprocess.run(\n185             [\"docker\", \"exec\", container_name, \"df\", \"-P\", path],\n186             capture_output=True,\n187             text=True,\n188             encoding=\"utf-8\",\n189             errors=\"ignore\",\n190             timeout=10,\n191             check=False,\n192         )\n193     except Exception:\n",
-      "col_offset": 17,
-      "end_col_offset": 9,
-      "filename": "./health_strategies.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 78,
-        "link": "https://cwe.mitre.org/data/definitions/78.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 184,
-      "line_range": [
-        184,
-        185,
-        186,
-        187,
-        188,
-        189,
-        190,
-        191,
-        192
-      ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
-      "test_id": "B603",
-      "test_name": "subprocess_without_shell_equals_true"
-    },
-    {
-      "code": "227             candidate_paths.append(str(row[0]))\n228     except Exception:\n229         pass\n230 \n",
-      "col_offset": 4,
-      "end_col_offset": 12,
-      "filename": "./health_strategies.py",
-      "issue_confidence": "HIGH",
-      "issue_cwe": {
-        "id": 703,
-        "link": "https://cwe.mitre.org/data/definitions/703.html"
-      },
-      "issue_severity": "LOW",
-      "issue_text": "Try, Except, Pass detected.",
-      "line_number": 228,
-      "line_range": [
+        226,
+        227,
         228,
-        229
+        229,
+        230,
+        231,
+        232,
+        233,
+        234
       ],
-      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
-      "test_id": "B110",
-      "test_name": "try_except_pass"
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html",
+      "test_id": "B607",
+      "test_name": "start_process_with_partial_path"
     },
     {
-      "code": "236                 candidate_paths.append(location)\n237     except Exception:\n238         pass\n239 \n",
+      "code": "225     try:\n226         result = subprocess.run(\n227             [\"docker\", \"exec\", container_name, \"df\", \"-P\", path],\n228             capture_output=True,\n229             text=True,\n230             encoding=\"utf-8\",\n231             errors=\"ignore\",\n232             timeout=10,\n233             check=False,\n234         )\n235     except Exception:\n",
+      "col_offset": 17,
+      "end_col_offset": 9,
+      "filename": "./health_strategies.py",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 78,
+        "link": "https://cwe.mitre.org/data/definitions/78.html"
+      },
+      "issue_severity": "LOW",
+      "issue_text": "subprocess call - check for execution of untrusted input.",
+      "line_number": 226,
+      "line_range": [
+        226,
+        227,
+        228,
+        229,
+        230,
+        231,
+        232,
+        233,
+        234
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
+      "test_id": "B603",
+      "test_name": "subprocess_without_shell_equals_true"
+    },
+    {
+      "code": "269             candidate_paths.append(str(row[0]))\n270     except Exception:\n271         pass\n272 \n",
       "col_offset": 4,
       "end_col_offset": 12,
       "filename": "./health_strategies.py",
@@ -683,17 +662,38 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 237,
+      "line_number": 270,
       "line_range": [
-        237,
-        238
+        270,
+        271
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "501                 reg_rows = job_cursor.fetchone()\n502             except Exception:\n503                 continue\n504 \n",
+      "code": "278                 candidate_paths.append(location)\n279     except Exception:\n280         pass\n281 \n",
+      "col_offset": 4,
+      "end_col_offset": 12,
+      "filename": "./health_strategies.py",
+      "issue_confidence": "HIGH",
+      "issue_cwe": {
+        "id": 703,
+        "link": "https://cwe.mitre.org/data/definitions/703.html"
+      },
+      "issue_severity": "LOW",
+      "issue_text": "Try, Except, Pass detected.",
+      "line_number": 279,
+      "line_range": [
+        279,
+        280
+      ],
+      "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
+      "test_id": "B110",
+      "test_name": "try_except_pass"
+    },
+    {
+      "code": "543                 reg_rows = job_cursor.fetchone()\n544             except Exception:\n545                 continue\n546 \n",
       "col_offset": 12,
       "end_col_offset": 24,
       "filename": "./health_strategies.py",
@@ -704,17 +704,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Continue detected.",
-      "line_number": 502,
+      "line_number": 544,
       "line_range": [
-        502,
-        503
+        544,
+        545
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b112_try_except_continue.html",
       "test_id": "B112",
       "test_name": "try_except_continue"
     },
     {
-      "code": "517             schedulers.append(\"pgAgent\")\n518     except Exception:\n519         pass\n520 \n",
+      "code": "559             schedulers.append(\"pgAgent\")\n560     except Exception:\n561         pass\n562 \n",
       "col_offset": 4,
       "end_col_offset": 12,
       "filename": "./health_strategies.py",
@@ -725,17 +725,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 518,
+      "line_number": 560,
       "line_range": [
-        518,
-        519
+        560,
+        561
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "1375                         reg_rows = job_cursor.fetchone()\n1376                     except Exception:\n1377                         continue\n1378 \n",
+      "code": "1579                         reg_rows = job_cursor.fetchone()\n1580                     except Exception:\n1581                         continue\n1582 \n",
       "col_offset": 20,
       "end_col_offset": 32,
       "filename": "./health_strategies.py",
@@ -746,17 +746,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Continue detected.",
-      "line_number": 1376,
+      "line_number": 1580,
       "line_range": [
-        1376,
-        1377
+        1580,
+        1581
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b112_try_except_continue.html",
       "test_id": "B112",
       "test_name": "try_except_continue"
     },
     {
-      "code": "1495                     job_conn.close()\n1496                 except Exception:\n1497                     pass\n1498 \n",
+      "code": "1699                     job_conn.close()\n1700                 except Exception:\n1701                     pass\n1702 \n",
       "col_offset": 16,
       "end_col_offset": 24,
       "filename": "./health_strategies.py",
@@ -767,17 +767,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 1496,
+      "line_number": 1700,
       "line_range": [
-        1496,
-        1497
+        1700,
+        1701
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "1550                     job_conn.close()\n1551                 except Exception:\n1552                     pass\n1553 \n",
+      "code": "1754                     job_conn.close()\n1755                 except Exception:\n1756                     pass\n1757 \n",
       "col_offset": 16,
       "end_col_offset": 24,
       "filename": "./health_strategies.py",
@@ -788,17 +788,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 1551,
+      "line_number": 1755,
       "line_range": [
-        1551,
-        1552
+        1755,
+        1756
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "26 import time\n27 import subprocess\n28 import telebot\n",
+      "code": "26 import time\n27 import subprocess\n28 from threading import RLock\n",
       "col_offset": 0,
       "end_col_offset": 17,
       "filename": "./telegram_listener.py",
@@ -818,7 +818,7 @@
       "test_name": "blacklist"
     },
     {
-      "code": "125             conn.autocommit = True\n126         except Exception:\n127             pass\n128         return conn\n",
+      "code": "132             conn.autocommit = True\n133         except Exception:\n134             pass\n135         return conn\n",
       "col_offset": 8,
       "end_col_offset": 16,
       "filename": "./telegram_listener.py",
@@ -829,17 +829,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 126,
+      "line_number": 133,
       "line_range": [
-        126,
-        127
+        133,
+        134
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "178         bot.send_chat_action(chat_id, \"typing\")\n179     except Exception:\n180         pass\n181 \n",
+      "code": "331         bot.send_chat_action(chat_id, \"typing\")\n332     except Exception:\n333         pass\n334 \n",
       "col_offset": 4,
       "end_col_offset": 12,
       "filename": "./telegram_listener.py",
@@ -850,17 +850,17 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 179,
+      "line_number": 332,
       "line_range": [
-        179,
-        180
+        332,
+        333
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",
       "test_name": "try_except_pass"
     },
     {
-      "code": "745                 with open(backup_yolu, \"wb\") as dump_file:\n746                     result = subprocess.run(\n747                         cmd,\n748                         stdout=dump_file,\n749                         stderr=subprocess.PIPE,\n750                         timeout=timeout_sec,\n751                         check=False,\n752                     )\n753 \n",
+      "code": "928                 with open(backup_yolu, \"wb\") as dump_file:\n929                     result = subprocess.run(\n930                         cmd,\n931                         stdout=dump_file,\n932                         stderr=subprocess.PIPE,\n933                         timeout=timeout_sec,\n934                         check=False,\n935                     )\n936 \n",
       "col_offset": 29,
       "end_col_offset": 21,
       "filename": "./telegram_listener.py",
@@ -871,22 +871,22 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 746,
+      "line_number": 929,
       "line_range": [
-        746,
-        747,
-        748,
-        749,
-        750,
-        751,
-        752
+        929,
+        930,
+        931,
+        932,
+        933,
+        934,
+        935
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",
       "test_name": "subprocess_without_shell_equals_true"
     },
     {
-      "code": "770                 env[\"PGPASSWORD\"] = str(DB_PASSWORD or \"\")\n771                 result = subprocess.run(\n772                     cmd,\n773                     env=env,\n774                     capture_output=True,\n775                     text=True,\n776                     encoding=\"utf-8\",\n777                     errors=\"ignore\",\n778                     timeout=timeout_sec,\n779                     check=False,\n780                 )\n781                 if result.returncode != 0:\n",
+      "code": "953                 env[\"PGPASSWORD\"] = str(DB_PASSWORD or \"\")\n954                 result = subprocess.run(\n955                     cmd,\n956                     env=env,\n957                     capture_output=True,\n958                     text=True,\n959                     encoding=\"utf-8\",\n960                     errors=\"ignore\",\n961                     timeout=timeout_sec,\n962                     check=False,\n963                 )\n964                 if result.returncode != 0:\n",
       "col_offset": 25,
       "end_col_offset": 17,
       "filename": "./telegram_listener.py",
@@ -897,25 +897,25 @@
       },
       "issue_severity": "LOW",
       "issue_text": "subprocess call - check for execution of untrusted input.",
-      "line_number": 771,
+      "line_number": 954,
       "line_range": [
-        771,
-        772,
-        773,
-        774,
-        775,
-        776,
-        777,
-        778,
-        779,
-        780
+        954,
+        955,
+        956,
+        957,
+        958,
+        959,
+        960,
+        961,
+        962,
+        963
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html",
       "test_id": "B603",
       "test_name": "subprocess_without_shell_equals_true"
     },
     {
-      "code": "807             conn.close()\n808         except Exception:\n809             pass\n810 \n",
+      "code": "990             conn.close()\n991         except Exception:\n992             pass\n993 \n",
       "col_offset": 8,
       "end_col_offset": 16,
       "filename": "./telegram_listener.py",
@@ -926,10 +926,10 @@
       },
       "issue_severity": "LOW",
       "issue_text": "Try, Except, Pass detected.",
-      "line_number": 808,
+      "line_number": 991,
       "line_range": [
-        808,
-        809
+        991,
+        992
       ],
       "more_info": "https://bandit.readthedocs.io/en/1.9.4/plugins/b110_try_except_pass.html",
       "test_id": "B110",

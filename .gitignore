@@ -6,7 +6,8 @@ DBvenv/
 
 # SQLite veritabanı
 dbmonitor.sqlite3
-
+dbmonitor.sqlite3-shm
+dbmonitor.sqlite3-wal
 # Python önbelleği
 __pycache__/
 *.py[cod]
@@ -22,3 +23,5 @@ __pycache__/
 # Runtime log dosyalari
 logs/
 *.log
+
+bandit-project.json
